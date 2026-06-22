@@ -111,6 +111,8 @@ def main(args):
     print(f"  route_per_head: {args.route_per_head}")
     print(f"  route_neighbor_expand: {args.route_neighbor_expand}")
     print(f"  route_selection_mode: {args.route_selection_mode}")
+    print(f"  route_hybrid_core_ratio: {args.route_hybrid_core_ratio}")
+    print(f"  route_hybrid_core_max_per_turn: {args.route_hybrid_core_max_per_turn}")
     print(f"  turn_rerank_qk_weight: {args.turn_rerank_qk_weight}")
     print(f"  turn_rerank_lexical_weight: {args.turn_rerank_lexical_weight}")
     print(f"  turn_rerank_head_vote_weight: {args.turn_rerank_head_vote_weight}")
@@ -1193,6 +1195,8 @@ def main(args):
                         "cache_candidate_keys": bool(args.cache_candidate_keys),
                         "cache_query_q": bool(args.cache_query_q),
                         "route_selection_mode": args.route_selection_mode,
+                        "route_hybrid_core_ratio": args.route_hybrid_core_ratio,
+                        "route_hybrid_core_max_per_turn": args.route_hybrid_core_max_per_turn,
                         "turn_rerank_qk_weight": args.turn_rerank_qk_weight,
                         "turn_rerank_lexical_weight": args.turn_rerank_lexical_weight,
                         "turn_rerank_head_vote_weight": args.turn_rerank_head_vote_weight,
@@ -1555,6 +1559,8 @@ def main(args):
                         "route_per_head": args.route_per_head,
                         "route_neighbor_expand": args.route_neighbor_expand,
                         "route_selection_mode": args.route_selection_mode,
+                        "route_hybrid_core_ratio": args.route_hybrid_core_ratio,
+                        "route_hybrid_core_max_per_turn": args.route_hybrid_core_max_per_turn,
                         "turn_rerank_qk_weight": args.turn_rerank_qk_weight,
                         "turn_rerank_lexical_weight": args.turn_rerank_lexical_weight,
                         "turn_rerank_head_vote_weight": args.turn_rerank_head_vote_weight,
@@ -1711,8 +1717,12 @@ def build_arg_parser():
     parser.add_argument("--route_neighbor_expand", type=int, default=0,
                         help="选中 chunk 的邻居扩展数，0=不扩展")
     parser.add_argument("--route_selection_mode", type=str, default="chunk_topk",
-                        choices=["chunk_topk", "turn_rerank"],
+                        choices=["chunk_topk", "turn_rerank", "hybrid"],
                         help="final evidence selector after exact Q-K scoring")
+    parser.add_argument("--route_hybrid_core_ratio", type=float, default=0.50,
+                        help="hybrid selector fraction reserved for raw Q-K core chunks")
+    parser.add_argument("--route_hybrid_core_max_per_turn", type=int, default=1,
+                        help="maximum raw-QK core chunks kept per turn before coverage/backfill")
     parser.add_argument("--turn_rerank_qk_weight", type=float, default=0.65,
                         help="turn_rerank weight for normalized turn Q-K score")
     parser.add_argument("--turn_rerank_lexical_weight", type=float, default=0.25,

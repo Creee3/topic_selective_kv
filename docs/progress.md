@@ -3561,3 +3561,66 @@ prompt/evidence formatting is the next bottleneck.
 If neither improves, the issue is likely deeper in Q-K scoring itself, not just
 the final selector.
 ```
+
+## Hybrid Evidence Selection On 2026-06-22
+
+Motivation:
+
+```text
+The pure turn_rerank selector improved selected-turn recall but hurt answer F1.
+This suggests that fully replacing raw Q-K top-k loses some high-confidence
+evidence, even though turn-level coverage is useful.
+
+The next selector should therefore not be "one score to replace Q-K". It should
+separate roles:
+
+  raw Q-K core       = keep high-confidence chunks
+  turn coverage      = add different turns that look useful after aggregation
+  Q-K backfill       = fill any remaining budget with strong raw-QK chunks
+```
+
+Code change:
+
+```text
+qmsum_mainline_routing.py adds route_selection_mode=hybrid.
+
+hybrid selection does:
+
+  1. rank all scored chunks by raw Q-K
+  2. reserve route_hybrid_core_ratio of the budget for a Q-K core
+  3. apply route_hybrid_core_max_per_turn so one turn cannot consume the core
+  4. run turn_rerank over all scored candidates
+  5. add reranked candidates only if they introduce new turns
+  6. backfill by raw Q-K if the budget is still not full
+
+qmsum_mainline_config.py adds mainline_profile=hybrid_select. It keeps the same
+candidate-control envelope as current, so the experiment isolates final
+evidence selection.
+```
+
+Default profile:
+
+```text
+mainline_profile = hybrid_select
+route_selection_mode = hybrid
+route_hybrid_core_ratio = 0.50
+route_hybrid_core_max_per_turn = 1
+turn_rerank_qk_weight = 0.65
+turn_rerank_lexical_weight = 0.25
+turn_rerank_head_vote_weight = 0.10
+```
+
+How to interpret:
+
+```text
+hybrid_select should be compared primarily against current, not quality_guard.
+
+If selected F1 improves without losing much TTFT, hybrid is a better final
+selector.
+
+If selected-turn recall improves but selected F1 does not, answer prompting or
+turn ordering is still the bottleneck.
+
+If it regresses like pure turn_rerank, raw Q-K top-k remains the safer mainline
+and future work should focus on scoring itself rather than final selection.
+```

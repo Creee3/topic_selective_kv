@@ -139,6 +139,53 @@ MAINLINE_PROFILES = {
         "answer_evidence_max_entries": 80,
         "answer_evidence_max_chars": 600,
     },
+    "hybrid_select": {
+        # Structured final selector:
+        #   1) keep a raw-QK core for high-confidence evidence
+        #   2) add turn-level rerank candidates for coverage
+        #   3) backfill by raw Q-K if the budget is not full
+        "routing_granularity": "hierarchical",
+        "hier_top_strategy": "lexical",
+        "hier_top_topics": 1,
+        "hier_topic_score_mode": "sum",
+        "route_chunk_size": 128,
+        "route_top_k": 12,
+        "route_neighbor_expand": 0,
+        "route_per_head": True,
+        "dynamic_route_budget": True,
+        "dynamic_summary_top_k": 16,
+        "dynamic_detail_top_k": 12,
+        "dynamic_balanced_top_k": 12,
+        "dynamic_candidate_pool_budget": True,
+        "dynamic_candidate_pool_budget_map": "summary:96,detail:48,balanced:56,default:56",
+        "dynamic_candidate_pool_min_keep": 24,
+        "route_candidate_prefilter": "lexical",
+        "route_candidate_prefilter_factor": 6,
+        "route_candidate_prefilter_min_keep": 48,
+        "route_candidate_prefilter_max_keep": 128,
+        "route_candidate_prefilter_keep_ratio": 0.0,
+        "route_candidate_prefilter_min_prune_ratio": 0.0,
+        "route_coarse_segment_gate": "lexical",
+        "route_coarse_segment_size": 4,
+        "route_coarse_segment_keep_ratio": 0.65,
+        "route_coarse_segment_min_keep": 64,
+        "route_coarse_segment_max_keep": 0,
+        "qk_score_batch_size": 64,
+        "cache_candidate_keys": True,
+        "cache_query_q": True,
+        "route_selection_mode": "hybrid",
+        "route_hybrid_core_ratio": 0.50,
+        "route_hybrid_core_max_per_turn": 1,
+        "turn_rerank_qk_weight": 0.65,
+        "turn_rerank_lexical_weight": 0.25,
+        "turn_rerank_head_vote_weight": 0.10,
+        "answer_evidence_order": "qk_then_time",
+        "selected_answer_context_mode": "turns",
+        "answer_prompt_style": "grounded",
+        "answer_max_new_tokens": 96,
+        "answer_evidence_max_entries": 80,
+        "answer_evidence_max_chars": 600,
+    },
     "simple": {
         # Minimal teaching/debugging path: no middle pruning/gating extras.
         "routing_granularity": "hierarchical",
@@ -182,6 +229,7 @@ def add_mainline_profile_argument(parser):
             "defaults, 'current' is the latest stable selective-fetch path, "
             "'quality_guard' is a conservative candidate-recall path, and "
             "'turn_rerank' tests turn-level final evidence selection. "
+            "'hybrid_select' keeps a raw-QK core plus turn-level coverage. "
             "'simple' is a minimal explanation/debug path."
         ),
     )

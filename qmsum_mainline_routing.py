@@ -448,6 +448,120 @@ def select_candidates_turn_rerank(
     return selected_candidates, debug
 
 
+def select_candidates_hybrid(
+    scored_candidates,
+    per_head_scores,
+    candidate_prefilter_scores,
+    transcripts,
+    query_text,
+    effective_route_top_k,
+    args,
+):
+    """Keep a raw-QK core, then add turn-level coverage candidates."""
+    if not scored_candidates:
+        return [], {"selection_mode": "hybrid", "target_k": 0}
+
+    target_k = min(int(effective_route_top_k), len(scored_candidates))
+    core_ratio = min(
+        1.0,
+        max(0.0, float(getattr(args, "route_hybrid_core_ratio", 0.5))),
+    )
+    core_count = int(np.ceil(float(target_k) * core_ratio))
+    core_count = min(target_k, max(1, core_count))
+    core_max_per_turn = max(
+        1,
+        int(getattr(args, "route_hybrid_core_max_per_turn", 1)),
+    )
+
+    qk_ranked = sorted(
+        scored_candidates,
+        key=lambda cand: (
+            -float(cand.get("score", 0.0)),
+            int(cand["start_t"]),
+            int(cand["candidate_id"]),
+        ),
+    )
+    core_candidates = qk_ranked[:core_count]
+
+    selected = []
+    selected_ids = set()
+    covered_turns = set()
+    core_turn_counts = defaultdict(int)
+    selected_stage = {}
+    for cand in qk_ranked:
+        if len(selected) >= core_count:
+            break
+        candidate_id = int(cand["candidate_id"])
+        turn_idx = int(cand["turn_idx"])
+        if candidate_id in selected_ids:
+            continue
+        if core_turn_counts[turn_idx] >= core_max_per_turn:
+            continue
+        selected.append(cand)
+        selected_ids.add(candidate_id)
+        covered_turns.add(turn_idx)
+        core_turn_counts[turn_idx] += 1
+        selected_stage[candidate_id] = "qk_core"
+
+    turn_candidates, turn_debug = select_candidates_turn_rerank(
+        scored_candidates,
+        per_head_scores,
+        candidate_prefilter_scores,
+        transcripts,
+        query_text,
+        len(scored_candidates),
+        args,
+    )
+    coverage_added = 0
+    for cand in turn_candidates:
+        if len(selected) >= target_k:
+            break
+        candidate_id = int(cand["candidate_id"])
+        turn_idx = int(cand["turn_idx"])
+        if candidate_id in selected_ids or turn_idx in covered_turns:
+            continue
+        selected.append(cand)
+        selected_ids.add(candidate_id)
+        covered_turns.add(turn_idx)
+        selected_stage[candidate_id] = "turn_coverage"
+        coverage_added += 1
+
+    backfill_added = 0
+    for cand in qk_ranked:
+        if len(selected) >= target_k:
+            break
+        candidate_id = int(cand["candidate_id"])
+        if candidate_id in selected_ids:
+            continue
+        selected.append(cand)
+        selected_ids.add(candidate_id)
+        selected_stage[candidate_id] = "qk_backfill"
+        backfill_added += 1
+
+    debug = {
+        "selection_mode": "hybrid",
+        "target_k": int(target_k),
+        "route_hybrid_core_ratio": float(core_ratio),
+        "route_hybrid_core_max_per_turn": int(core_max_per_turn),
+        "qk_core_target_count": int(core_count),
+        "qk_core_count": int(len([stage for stage in selected_stage.values() if stage == "qk_core"])),
+        "turn_coverage_added": int(coverage_added),
+        "qk_backfill_added": int(backfill_added),
+        "selected_turn_count": int(len({int(c["turn_idx"]) for c in selected})),
+        "selected_candidate_stages": [
+            {
+                "candidate_id": int(cand["candidate_id"]),
+                "turn_idx": int(cand["turn_idx"]),
+                "stage": selected_stage.get(int(cand["candidate_id"]), ""),
+                "score": float(cand.get("score", 0.0)),
+            }
+            for cand in selected[:20]
+        ],
+        "turn_rerank_preview": turn_debug.get("turn_rerank_preview", []),
+    }
+    return selected, debug
+
+
 def _answer_cue_bonus(text, query_type):
     text = (text or "").lower()
     detail_cues = [
@@ -1909,6 +2023,16 @@ def score_mainline_topic_chunk(
             effective_route_top_k,
             args,
         )
+    elif selection_mode == "hybrid":
+        selected_candidates, route_selection_debug = select_candidates_hybrid(
+            scored_candidates,
+            per_head_scores,
+            candidate_prefilter_scores,
+            transcripts,
+            query_text,
+            effective_route_top_k,
+            args,
+        )
     else:
         selection_mode = "chunk_topk"
         selected_candidates, route_selection_debug = select_candidates_chunk_topk(
@@ -2065,6 +2189,12 @@ def score_mainline_topic_chunk(
         "route_per_head": args.route_per_head,
         "route_neighbor_expand": args.route_neighbor_expand,
         "route_selection_mode": selection_mode,
+        "route_hybrid_core_ratio": float(
+            getattr(args, "route_hybrid_core_ratio", 0.5)
+        ),
+        "route_hybrid_core_max_per_turn": int(
+            getattr(args, "route_hybrid_core_max_per_turn", 1)
+        ),
         "route_selection_debug": route_selection_debug,
         "route_diversity_filter": args.route_diversity_filter,
         "route_diversity_max_similarity": args.route_diversity_max_similarity,
