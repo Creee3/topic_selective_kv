@@ -1,0 +1,1069 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>第 10 章：评价指标与 TTFT 估算</title>
+<style>
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+  color: #1f2933;
+  line-height: 1.78;
+  max-width: 940px;
+  margin: 0 auto;
+  padding: 40px 28px 84px;
+  background: #ffffff;
+}
+h2 {
+  font-size: 25px;
+  margin: 0 0 24px;
+  border-bottom: 2px solid #d8dee9;
+  padding-bottom: 14px;
+}
+h3 {
+  font-size: 18px;
+  margin-top: 32px;
+  color: #243b53;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 6px;
+}
+p { margin: 12px 0; }
+code {
+  font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  background: #f3f4f6;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+pre {
+  background: #0f172a;
+  color: #e5e7eb;
+  padding: 14px 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.toc {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 24px 0 34px;
+}
+.toc h3 {
+  margin-top: 0;
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.toc ol { margin: 0; padding-left: 22px; }
+.toc li { margin: 4px 0; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0 22px;
+  font-size: 14px;
+}
+th, td {
+  border: 1px solid #d8dee9;
+  padding: 8px 10px;
+  vertical-align: top;
+}
+th {
+  background: #f1f5f9;
+  text-align: left;
+}
+.note {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 16px 0;
+}
+.key {
+  background: #ecfdf5;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 16px 0;
+}
+hr {
+  border: 0;
+  border-top: 1px solid #e5e7eb;
+  margin: 30px 0;
+}
+a { color: #2563eb; text-decoration: none; }
+</style>
+</head>
+<body>
+<h2>第 10 章：评价指标与 TTFT 估算</h2>
+
+<div class="toc">
+<h3>目录</h3>
+<ol>
+  <li><a href="#sec-10-0">10.0 本章一句话</a></li>
+  <li><a href="#sec-10-1">10.1 第十章在系统里的位置</a></li>
+  <li><a href="#sec-10-2">10.2 selected_turn recall / precision / F1</a></li>
+  <li><a href="#sec-10-3">10.3 relevant candidate survival</a></li>
+  <li><a href="#sec-10-4">10.4 answer F1</a></li>
+  <li><a href="#sec-10-5">10.5 context token saving</a></li>
+  <li><a href="#sec-10-6">10.6 从 selected chunks 到 selected KV bytes</a></li>
+  <li><a href="#sec-10-7">10.7 从 selected chunks 到传输账本</a></li>
+  <li><a href="#sec-10-8">10.8 从传输账本到 fetch latency</a></li>
+  <li><a href="#sec-10-9">10.9 从 routing + fetch 到 TTFT</a></li>
+  <li><a href="#sec-10-10">10.10 simulator wall-clock 和 system routing</a></li>
+  <li><a href="#sec-10-11">10.11 你这个实验的完整时延流动过程</a></li>
+  <li><a href="#sec-10-12">10.12 各指标分别证明什么</a></li>
+  <li><a href="#sec-10-13">10.13 一个完整数字例子</a></li>
+  <li><a href="#sec-10-14">10.14 给老师汇报的版本</a></li>
+</ol>
+</div>
+
+<h3 id="sec-10-0">10.0 本章一句话</h3>
+
+<p>第十章不再改路由算法，而是评估路由结果。</p>
+
+<pre><code>第十章要证明：
+1. 选出来的 evidence 是否命中 gold evidence；
+2. 最终答案质量是否还能接受；
+3. 需要传输的 KV 是否显著减少；
+4. estimated TTFT 是否显著下降；
+5. timing 口径是否公平、透明。</code></pre>
+
+<div class="key">
+  <p><strong>核心记忆：</strong>第十章是证据质量、答案质量、通信成本、系统时延的综合评估层。</p>
+</div>
+
+<hr>
+
+<h3 id="sec-10-1">10.1 第十章在系统里的位置</h3>
+
+<p>第九章结束后，系统已经得到：</p>
+
+<pre><code>selected_candidates</code></pre>
+
+<p>这些就是最终被选中的 KV chunks。第十章接手后，会评估：</p>
+
+<pre><code>这些 selected chunks 好不好？
+传它们比传 full KV 省多少？
+TTFT 估计能降多少？
+答案质量有没有崩？</code></pre>
+
+<p>所以第十章的对象不是 candidate pool，而是最终路由结果。</p>
+
+<pre><code>selected_candidates
+-> evidence metrics
+-> answer metrics
+-> transfer metrics
+-> system cost / TTFT metrics</code></pre>
+
+<hr>
+
+<h3 id="sec-10-2">10.2 selected_turn recall / precision / F1</h3>
+
+<p>QMSum 的每个 specific query 有 <code>relevant_text_span</code>，它可以被转换成 gold evidence 所在的 turns：</p>
+
+<pre><code>relevant_text_span
+-> relevant_turns</code></pre>
+
+<p>系统选出的 chunks 也能映射到 turns：</p>
+
+<pre><code>selected_candidates
+-> selected_turns</code></pre>
+
+<p>于是就可以比较：</p>
+
+<pre><code>selected_turns 和 relevant_turns 有多少重合？</code></pre>
+
+<p>假设：</p>
+
+<pre><code>relevant_turns = {10, 11, 12, 13}
+selected_turns = {8, 10, 12, 20}
+matched_turns = {10, 12}</code></pre>
+
+<p>recall 是：</p>
+
+<pre><code>recall = 命中的 relevant turns 数量 / 全部 relevant turns 数量
+       = 2 / 4
+       = 0.5</code></pre>
+
+<p>precision 是：</p>
+
+<pre><code>precision = 命中的 relevant turns 数量 / selected turns 数量
+          = 2 / 4
+          = 0.5</code></pre>
+
+<p>F1 是：</p>
+
+<pre><code>F1 = 2 * precision * recall / (precision + recall)</code></pre>
+
+<p>代入：</p>
+
+<pre><code>F1 = 2 * 0.5 * 0.5 / (0.5 + 0.5)
+   = 0.5</code></pre>
+
+<table>
+  <tr>
+    <th>指标</th>
+    <th>问题</th>
+    <th>含义</th>
+  </tr>
+  <tr>
+    <td>selected_turn recall</td>
+    <td>gold evidence 里有多少被我选到了？</td>
+    <td>越高说明证据漏得越少</td>
+  </tr>
+  <tr>
+    <td>selected_turn precision</td>
+    <td>我选出来的 turns 有多少是真的相关？</td>
+    <td>越高说明选得越干净</td>
+  </tr>
+  <tr>
+    <td>selected_turn F1</td>
+    <td>覆盖和干净程度的综合表现如何？</td>
+    <td>recall 和 precision 的平衡</td>
+  </tr>
+</table>
+
+<div class="note">
+  <p><strong>注意：</strong>selected_turn F1 是 evidence-level 指标，不等于最终答案质量。答案质量还要看 answer F1。</p>
+</div>
+
+<hr>
+
+<h3 id="sec-10-3">10.3 relevant candidate survival</h3>
+
+<p>这是用来定位 bad case 的指标。它回答：</p>
+
+<pre><code>如果 gold evidence 没被选到，
+它到底死在第 7/8/9 哪一层？</code></pre>
+
+<p>代码会统计类似：</p>
+
+<pre><code>topic-filter recall
+prefilter recall
+dynamic-pool recall
+coarse-gate recall
+Q-K scored recall
+Q-K selected recall</code></pre>
+
+<table>
+  <tr>
+    <th>阶段</th>
+    <th>如果这里 recall 下降，说明什么</th>
+  </tr>
+  <tr>
+    <td>topic filter</td>
+    <td>第七章粗路由选错 topic，相关 turn 不在 selected topic 里</td>
+  </tr>
+  <tr>
+    <td>candidate prefilter</td>
+    <td>第八章 lexical prefilter 把相关 chunk 裁掉了</td>
+  </tr>
+  <tr>
+    <td>dynamic candidate pool</td>
+    <td>第八章按 query 类型缩池时裁掉了相关证据</td>
+  </tr>
+  <tr>
+    <td>coarse segment gate</td>
+    <td>第八章 segment gate 裁掉了相关连续段</td>
+  </tr>
+  <tr>
+    <td>Q-K selected</td>
+    <td>第九章 Q-K 排名没有把相关 chunk 排进 top-k</td>
+  </tr>
+</table>
+
+<p>这个指标的价值是：它不只告诉你“错了”，还能告诉你“错在哪一层”。</p>
+
+<hr>
+
+<h3 id="sec-10-4">10.4 answer F1</h3>
+
+<p>selected_turn 指标只看证据，answer F1 看最终生成答案。</p>
+
+<pre><code>full_answer:
+  用完整会议上下文生成答案。
+
+selected_answer:
+  只用 selected chunks / turns 生成答案。
+
+oracle_answer:
+  用 QMSum gold relevant turns 生成答案。</code></pre>
+
+<p>它们分别得到：</p>
+
+<pre><code>full_answer_f1
+selected_answer_f1
+oracle_answer_f1</code></pre>
+
+<p>如果结果类似：</p>
+
+<pre><code>full F1:       18.04%
+selected F1:   16.79%
+oracle F1:     20.94%</code></pre>
+
+<p>可以这样解释：</p>
+
+<pre><code>selected 比 full 低约 1.25 个点；
+oracle 比 full 高，说明完整上下文不一定最利于回答；
+selected 和 oracle 还有差距，说明路由证据仍有提升空间。</code></pre>
+
+<p>answer F1 证明的是：</p>
+
+<pre><code>大幅减少上下文后，最终答案质量是否还能接近 full context。</code></pre>
+
+<hr>
+
+<h3 id="sec-10-5">10.5 context token saving</h3>
+
+<p>context token saving 衡量答案生成时上下文缩短了多少。</p>
+
+<pre><code>context_token_saving_ratio =
+  1 - selected_context_tokens / full_context_tokens</code></pre>
+
+<p>例如：</p>
+
+<pre><code>full_context_tokens = 20000
+selected_context_tokens = 1200
+
+context token saving =
+  1 - 1200 / 20000
+  = 0.94
+  = 94%</code></pre>
+
+<p>这个指标和 answer F1 应该一起看：</p>
+
+<pre><code>如果 context token saving 很高，
+但 answer F1 完全崩了，
+说明选得太狠。
+
+如果 context token saving 很高，
+answer F1 只小幅下降，
+说明 selective context 有意义。</code></pre>
+
+<hr>
+
+<h3 id="sec-10-6">10.6 从 selected chunks 到 selected KV bytes</h3>
+
+<p>从 10.6 开始，重点从“证据质量”切换到“系统时延”。时延估算的第一步是：先把第九章选出来的 chunks 转成需要传输的 KV 字节数。</p>
+
+<pre><code>第九章输出：
+selected_candidates
+
+第十章先算：
+selected_token_count
+selected_kv_bytes
+selected_kv_mib</code></pre>
+
+<p><code>selected_token_count</code> 是被选中的 chunks 一共有多少 token。</p>
+
+<pre><code>chunk A: 50 tokens
+chunk B: 40 tokens
+chunk C: 30 tokens
+
+selected_token_count =
+  50 + 40 + 30
+  = 120 tokens</code></pre>
+
+<p>然后要知道一个 token 的 KV cache 有多大。代码里使用：</p>
+
+<pre><code>kv_bytes_per_token =
+  2 * num_layers * num_key_value_heads * head_dim * kv_cache_dtype_bytes</code></pre>
+
+<p>这里每个部分的意思是：</p>
+
+<table>
+  <tr>
+    <th>部分</th>
+    <th>含义</th>
+  </tr>
+  <tr>
+    <td><code>2</code></td>
+    <td>KV cache 有 K 和 V 两份</td>
+  </tr>
+  <tr>
+    <td><code>num_layers</code></td>
+    <td>模型层数，每一层都有自己的 K/V cache</td>
+  </tr>
+  <tr>
+    <td><code>num_key_value_heads</code></td>
+    <td>KV heads 数量，当前 Mistral 类模型大约是 8</td>
+  </tr>
+  <tr>
+    <td><code>head_dim</code></td>
+    <td>每个 head 的维度，当前是 128</td>
+  </tr>
+  <tr>
+    <td><code>kv_cache_dtype_bytes</code></td>
+    <td>每个数占多少字节，FP16/BF16 通常是 2 bytes</td>
+  </tr>
+</table>
+
+<p>代入当前模型近似参数：</p>
+
+<pre><code>num_layers = 32
+num_key_value_heads = 8
+head_dim = 128
+kv_cache_dtype_bytes = 2
+
+kv_bytes_per_token =
+  2 * 32 * 8 * 128 * 2
+  = 131072 bytes
+  = 128 KiB/token</code></pre>
+
+<p>于是：</p>
+
+<pre><code>selected_kv_bytes =
+  selected_token_count * kv_bytes_per_token</code></pre>
+
+<p>如果：</p>
+
+<pre><code>full tokens = 17941
+selected tokens = 262</code></pre>
+
+<p>那么：</p>
+
+<pre><code>full KV ≈ 17941 * 131072 bytes ≈ 2242.63 MiB
+selected KV ≈ 262 * 131072 bytes ≈ 32.75 MiB</code></pre>
+
+<p>KV saving 是：</p>
+
+<pre><code>KV saving =
+  1 - selected_kv_bytes / full_kv_bytes</code></pre>
+
+<p>这个指标证明的是：你的方法没有传全量 KV，而是只传被选中 token 对应的 KV，所以通信字节数大幅下降。</p>
+
+<hr>
+
+<h3 id="sec-10-7">10.7 从 selected chunks 到传输账本</h3>
+
+<p>现在已经知道要传多少 KV bytes，但还不够。网络时延不只和字节数有关，还和“从几个节点取”“分几段取”有关。</p>
+
+<p>所以代码会建立一个 <strong>transfer accounting</strong>，可以翻成“传输账本”。它不是新的算法，只是算账：</p>
+
+<pre><code>这些 selected chunks 一共多少 token？
+它们分布在几个 topic？
+它们分布在几个 virtual node？
+在每个 node 内，连续 chunks 能不能合并？
+合并后实际要传几段？</code></pre>
+
+<p>这里有几个词要先翻成人话。</p>
+
+<table>
+  <tr>
+    <th>英文</th>
+    <th>人话</th>
+    <th>在你的实验里是什么意思</th>
+  </tr>
+  <tr>
+    <td><code>unit</code></td>
+    <td>传输单位</td>
+    <td>可以按 topic 算，也可以按 virtual node 算</td>
+  </tr>
+  <tr>
+    <td><code>segment</code></td>
+    <td>连续传输段</td>
+    <td>token 坐标连续、可以合并成一次连续读取/传输的 KV 区间</td>
+  </tr>
+  <tr>
+    <td><code>coalescing</code></td>
+    <td>把连续 chunk 合并</td>
+    <td>减少传输段数，降低 segment overhead</td>
+  </tr>
+</table>
+
+<p>你的代码有两套账本：</p>
+
+<pre><code>topic-level transfer accounting:
+  选中的 chunks 来自几个 topic？
+  这是语义账本。
+
+virtual-node transfer accounting:
+  选中的 chunks 要从几个 virtual node 取？
+  这是系统账本。</code></pre>
+
+<p>TTFT 估算主要使用 virtual-node transfer accounting，因为真实网络访问的是节点，不是抽象 topic。</p>
+
+<p>看一个例子。系统最终选了 5 个 chunks：</p>
+
+<pre><code>chunk A: topic 3, node 1, token [1000,1128), 128 tokens
+chunk B: topic 3, node 1, token [1128,1256), 128 tokens
+chunk C: topic 3, node 1, token [1256,1384), 128 tokens
+chunk D: topic 5, node 2, token [6000,6128), 128 tokens
+chunk E: topic 5, node 2, token [6128,6256), 128 tokens</code></pre>
+
+<p>selected token 数：</p>
+
+<pre><code>selected_token_count =
+  5 * 128
+  = 640 tokens</code></pre>
+
+<p>topic-level unit：</p>
+
+<pre><code>topics = {3, 5}
+unique_transfer_unit_count = 2</code></pre>
+
+<p>virtual-node-level unit：</p>
+
+<pre><code>nodes = {1, 2}
+unique_transfer_unit_count = 2</code></pre>
+
+<p>再看 segment。node 1 上 chunk A/B/C 的 token 坐标连续：</p>
+
+<pre><code>[1000,1128) + [1128,1256) + [1256,1384)
+-> 可以合并成 1 个 segment: [1000,1384)</code></pre>
+
+<p>node 2 上 chunk D/E 连续：</p>
+
+<pre><code>[6000,6128) + [6128,6256)
+-> 可以合并成 1 个 segment: [6000,6256)</code></pre>
+
+<p>所以：</p>
+
+<pre><code>selected_chunk_count = 5
+transfer_segment_count = 2
+avg_chunks_per_transfer_segment = 5 / 2 = 2.5</code></pre>
+
+<p><code>coalescing_gain</code> 是合并连续 chunks 后减少了多少传输段：</p>
+
+<pre><code>coalescing_gain =
+  1 - transfer_segment_count / selected_chunk_count
+
+这里是：
+1 - 2 / 5 = 0.6 = 60%</code></pre>
+
+<p>意思是：如果不合并，5 个 chunk 可能要 5 段传输；合并后只要 2 段，段数减少了 60%。</p>
+
+<hr>
+
+<h3 id="sec-10-8">10.8 从传输账本到 fetch latency</h3>
+
+<p>现在已经有了三类信息：</p>
+
+<pre><code>1. 要传多少 KV bytes；
+2. 要访问几个 virtual nodes；
+3. 要传多少个 segments。</code></pre>
+
+<p>下一步就是估算 fetch latency，也就是“把 KV 从远端节点取回来”的时间。</p>
+
+<pre><code>fetch_latency_ms =
+  bandwidth_time_ms
+  + node_rtt_time_ms
+  + segment_overhead_time_ms</code></pre>
+
+<p>三项分别表示：</p>
+
+<table>
+  <tr>
+    <th>项</th>
+    <th>人话</th>
+    <th>公式</th>
+  </tr>
+  <tr>
+    <td><code>bandwidth_time_ms</code></td>
+    <td>数据本身传完要多久，KV 越大越慢</td>
+    <td><code>kv_bytes / bandwidth_bytes_per_ms</code></td>
+  </tr>
+  <tr>
+    <td><code>node_rtt_time_ms</code></td>
+    <td>访问远端节点的网络往返开销，节点越多越慢</td>
+    <td><code>transfer_unit_count * per_node_rtt_ms</code></td>
+  </tr>
+  <tr>
+    <td><code>segment_overhead_time_ms</code></td>
+    <td>每段传输的小额调度/请求开销，segment 越多越慢</td>
+    <td><code>transfer_segment_count * per_segment_overhead_ms</code></td>
+  </tr>
+</table>
+
+<p>当前默认假设大概是：</p>
+
+<pre><code>fetch_bandwidth_gbps = 25.0
+per_node_rtt_ms = 1.0
+per_segment_overhead_ms = 0.15</code></pre>
+
+<p>注意 <code>25 Gbps</code> 是 bit/s，不是 byte/s。换成 bytes/ms：</p>
+
+<pre><code>25 * 1,000,000,000 bits/s
+/ 8 = 3,125,000,000 bytes/s
+/ 1000 = 3,125,000 bytes/ms</code></pre>
+
+<p>如果 selected KV 是：</p>
+
+<pre><code>34,340,864 bytes</code></pre>
+
+<p>那么数据本身传输时间是：</p>
+
+<pre><code>bandwidth_time_ms =
+  34,340,864 / 3,125,000
+  ≈ 10.99 ms</code></pre>
+
+<p>如果 selected chunks 涉及：</p>
+
+<pre><code>1 个 virtual node
+12 个 transfer segments</code></pre>
+
+<p>那么：</p>
+
+<pre><code>node_rtt_time_ms =
+  1 * 1.0
+  = 1.0 ms
+
+segment_overhead_time_ms =
+  12 * 0.15
+  = 1.8 ms</code></pre>
+
+<p>所以：</p>
+
+<pre><code>selected_fetch_latency_ms =
+  10.99 + 1.0 + 1.8
+  = 13.79 ms</code></pre>
+
+<div class="note">
+  <p><strong>边界：</strong>这是一个简化的串行加法估算模型，不是真实网络 benchmark。真实系统里多个节点可能并行传输，RTT 和带宽传输可能重叠，也可能还有 RDMA、GPU copy、调度队列等额外因素。</p>
+</div>
+
+<p>但这个估算足够说明一个核心趋势：selected KV bytes 远小于 full KV bytes，所以 selected fetch latency 通常远低于 full fetch latency。</p>
+
+<hr>
+
+<h3 id="sec-10-9">10.9 从 routing + fetch 到 TTFT</h3>
+
+<p>TTFT 是 <code>time to first token</code>，也就是从 query 到达到模型开始吐第一个 token 前的时间。</p>
+
+<p>当前工程估算的不是完整答案生成总时延，而是：</p>
+
+<pre><code>到第一个 token 出来之前，需要花多久？</code></pre>
+
+<p>selected path 的公式是：</p>
+
+<pre><code>selected TTFT =
+  system routing compute
+  + selected KV fetch latency
+  + decode startup</code></pre>
+
+<p>每一项对应：</p>
+
+<table>
+  <tr>
+    <th>项</th>
+    <th>发生了什么</th>
+  </tr>
+  <tr>
+    <td><code>system routing compute</code></td>
+    <td>第 7/8/9 章在线路由：选 topic、控候选池、Q-K 精排、得到 selected chunks</td>
+  </tr>
+  <tr>
+    <td><code>selected KV fetch latency</code></td>
+    <td>根据 selected chunks，从远端 virtual nodes 拉回对应 KV</td>
+  </tr>
+  <tr>
+    <td><code>decode startup</code></td>
+    <td>KV 到位后，模型开始生成第一个 token 前的启动开销</td>
+  </tr>
+</table>
+
+<p>full baseline 不做 routing，直接拉 full KV：</p>
+
+<pre><code>full TTFT =
+  full KV fetch latency
+  + decode startup</code></pre>
+
+<p>为什么 full baseline 里 routing compute 是 0？因为 full baseline 的策略是：</p>
+
+<pre><code>不判断哪些 chunk 重要；
+直接把完整 KV 都取回来。</code></pre>
+
+<p>这个问题设定是：</p>
+
+<pre><code>KV 已经被 prefill/materialized，并分布在远端节点上。
+当前比较的是 query-time fetch：
+  full baseline 拉 full KV；
+  selective path 先 route，再拉 selected KV。</code></pre>
+
+<div class="note">
+  <p><strong>重要边界：</strong>TTFT 到第一个 token 为止，不包括第一个 token 之后继续生成完整答案的 decode 时间。</p>
+</div>
+
+<p>TTFT saving 是：</p>
+
+<pre><code>TTFT saving =
+  1 - selected_TTFT / full_TTFT</code></pre>
+
+<p>你的方法要成功，关键是：</p>
+
+<pre><code>多出来的 routing compute
+<
+省下来的 full KV fetch latency</code></pre>
+
+<hr>
+
+<h3 id="sec-10-10">10.10 simulator wall-clock 和 system routing</h3>
+
+<p>这一节只解决一个问题：</p>
+
+<pre><code>selected TTFT 里的 system routing compute，
+应该用本地脚本真实跑出来的 routing wall-clock 吗？</code></pre>
+
+<p>答案是：不完全用。因为你的本地实验是 simulator，它会做一个真实分布式系统里不应该在线做的动作。</p>
+
+<p>本地 simulator 的数据形态是：</p>
+
+<pre><code>我手里有一整场会议的完整 KV cache。</code></pre>
+
+<p>所以当它要对某个 candidate chunk 做 Q-K scoring 时，必须现场做：</p>
+
+<pre><code>完整 KV cache
+-> 按 start_t / end_t 切出 candidate chunk 的 K
+-> stack 成 Q-K scoring 要用的 tensor</code></pre>
+
+<p>这段操作在代码里叫：</p>
+
+<pre><code>candidate_key_prepare_ms</code></pre>
+
+<p>它是可以测出来的，因为代码直接用秒表包住了这段本地 tensor 操作：</p>
+
+<pre><code>start = time.perf_counter()
+
+kv_chunk = split_kv(kv_3d, cand["start_t"], cand["end_t"])
+stacked_keys = stack_keys_from_kv(kv_chunk)
+
+elapsed_ms = (time.perf_counter() - start) * 1000</code></pre>
+
+<p>但是目标分布式系统的设定不是这样。真实系统中，chunk KV 应该已经提前按 topic/chunk 存在远端 node 上。</p>
+
+<pre><code>真实系统：
+远端 node 已经存好了 chunk KV。
+在线 query 来了以后，系统决定取哪些 chunk，
+然后从对应 node fetch 这些 chunk KV。</code></pre>
+
+<p>所以本地 simulator 现场切 K 的时间不应该算进 system-accounted TTFT。代码把它单独记成：</p>
+
+<pre><code>routing_simulator_excluded_ms</code></pre>
+
+<p>三种时间关系是：</p>
+
+<table>
+  <tr>
+    <th>字段</th>
+    <th>意思</th>
+    <th>是否进入 selected TTFT</th>
+  </tr>
+  <tr>
+    <td><code>routing_wall_clock_ms</code></td>
+    <td>本地脚本完整 routing 真实跑了多久，包括现场切 K</td>
+    <td>不直接作为 system TTFT</td>
+  </tr>
+  <tr>
+    <td><code>routing_simulator_excluded_ms</code></td>
+    <td>本地 simulator 额外的 key slicing / prepare 时间</td>
+    <td>排除</td>
+  </tr>
+  <tr>
+    <td><code>routing_overhead_ms</code> / system routing</td>
+    <td>排除 simulator-only key slicing 后，估算真实系统应该承担的 routing compute</td>
+    <td>进入 selected TTFT</td>
+  </tr>
+</table>
+
+<p>公式是：</p>
+
+<pre><code>system routing =
+  routing wall-clock
+  - simulator excluded</code></pre>
+
+<p>例子：</p>
+
+<pre><code>routing_wall_clock_ms = 78.69 ms
+routing_simulator_excluded_ms = 15.36 ms
+
+system routing =
+  78.69 - 15.36
+  = 63.33 ms</code></pre>
+
+<p>于是 selected TTFT 使用的是：</p>
+
+<pre><code>selected TTFT =
+  63.33 ms system routing
+  + selected KV fetch
+  + decode startup</code></pre>
+
+<div class="note">
+  <p><strong>最关键边界：</strong>10.10 仍然只讨论第一个 token 出来之前的 routing 时间口径，不讨论第一个 token 之后继续生成完整答案的时间。</p>
+</div>
+
+<p>更诚实的论文表述应该是：</p>
+
+<pre><code>We report system-accounted TTFT excluding simulator-only key slicing.
+We also keep routing wall-clock and excluded simulator time as separate fields.</code></pre>
+
+<hr>
+
+<h3 id="sec-10-11">10.11 你这个实验的完整时延流动过程</h3>
+
+<p>现在把整个时延过程从头到尾串起来。这里说的是当前实验里 <strong>query 到 first token</strong> 的流程，不是完整答案生成总时延。</p>
+
+<pre><code>离线 / 已经发生：
+整场会议 prompt 已经 prefill；
+完整 KV cache 已经 materialized；
+topic / chunk / virtual node 信息已经可以用于 routing。</code></pre>
+
+<p>在线 query 到来以后，selected path 的时延流动是：</p>
+
+<pre><code>Step 1. query tokenize
+  把 query 文本变成 query_ids。
+
+Step 2. coarse topic routing
+  用 lexical / BM25 选出最相关 topic。
+
+Step 3. topic filter
+  只保留 selected topic 里的 candidate chunks。
+
+Step 4. candidate pool control
+  lexical prefilter
+  dynamic candidate pool
+  coarse segment gate
+  把候选池压到几十个 chunks。
+
+Step 5. Q-K execution preparation
+  query-Q cache:
+    对当前 query 只算一次 Q。
+  candidate-key preparation:
+    本地 simulator 从完整 KV 中切出 candidate K。
+    这部分会被记录为 simulator excluded。
+
+Step 6. exact Q-K scoring
+  对 candidates_to_score 计算 QK^T affinity，
+  聚合 layer/head/token 分数，
+  得到 chunk scalar。
+
+Step 7. selection postprocess
+  得到 selected_candidates，
+  给每个 chunk 标上 transfer_topic_id / transfer_node_id。
+
+Step 8. transfer accounting
+  统计 selected tokens、virtual nodes、transfer segments。
+
+Step 9. selected KV fetch latency estimation
+  用 KV bytes、node count、segment count 估算从远端拉 KV 的时间。
+
+Step 10. decode startup
+  KV 到位后，模型开始生成第一个 token 的启动开销。
+
+Step 11. first token appears
+  到这里为止，就是 TTFT。</code></pre>
+
+<p>因此 selected TTFT 的概念流是：</p>
+
+<pre><code>query arrives
+-> online routing compute
+   -> system routing = wall-clock - simulator-only key slicing
+-> selected KV fetch
+-> decode startup
+-> first token</code></pre>
+
+<p>而 full baseline 的时延流动更短：</p>
+
+<pre><code>query arrives
+-> no routing
+-> full KV fetch
+-> decode startup
+-> first token</code></pre>
+
+<p>两者核心区别是：</p>
+
+<table>
+  <tr>
+    <th>路径</th>
+    <th>多付出的东西</th>
+    <th>省下的东西</th>
+  </tr>
+  <tr>
+    <td>selected path</td>
+    <td>在线 routing compute</td>
+    <td>大量 full KV fetch 时间</td>
+  </tr>
+  <tr>
+    <td>full baseline</td>
+    <td>不做 routing</td>
+    <td>没有省 KV，必须拉完整 KV</td>
+  </tr>
+</table>
+
+<p>所以你的 TTFT 结果本质上在证明：</p>
+
+<pre><code>虽然 selective path 多付出了一段 routing compute，
+但是它少拉了太多 KV，
+所以 selected TTFT 仍然远低于 full TTFT。</code></pre>
+
+<hr>
+
+<h3 id="sec-10-12">10.12 各指标分别证明什么</h3>
+
+<table>
+  <tr>
+    <th>指标</th>
+    <th>证明什么</th>
+  </tr>
+  <tr>
+    <td>selected_turn recall</td>
+    <td>gold evidence 有没有被覆盖</td>
+  </tr>
+  <tr>
+    <td>selected_turn precision</td>
+    <td>选出来的证据是否干净</td>
+  </tr>
+  <tr>
+    <td>selected_turn F1</td>
+    <td>证据覆盖和干净程度的综合表现</td>
+  </tr>
+  <tr>
+    <td>relevant candidate survival</td>
+    <td>坏 case 到底死在 topic filter、prefilter、dynamic pool、gate 还是 Q-K selection</td>
+  </tr>
+  <tr>
+    <td>answer F1</td>
+    <td>最终答案质量有没有严重下降</td>
+  </tr>
+  <tr>
+    <td>context token saving</td>
+    <td>答案生成上下文缩短了多少</td>
+  </tr>
+  <tr>
+    <td>KV saving</td>
+    <td>需要传输的 KV 字节数减少了多少</td>
+  </tr>
+  <tr>
+    <td>fetch latency saving</td>
+    <td>网络拉取 KV 的时间减少了多少</td>
+  </tr>
+  <tr>
+    <td>TTFT saving</td>
+    <td>routing + selected fetch + decode startup 后，到第一个 token 的估计时间是否下降</td>
+  </tr>
+  <tr>
+    <td>routing wall / system / excluded</td>
+    <td>计时口径是否透明、公平</td>
+  </tr>
+</table>
+
+<hr>
+
+<h3 id="sec-10-13">10.13 一个完整数字例子</h3>
+
+<p>假设一个 case：</p>
+
+<pre><code>full tokens = 17941
+selected tokens = 262
+selected virtual nodes = 1
+selected transfer segments = 12
+full virtual nodes = 4
+kv_bytes_per_token = 131072 bytes</code></pre>
+
+<p>KV 大小：</p>
+
+<pre><code>selected KV =
+  262 * 131072
+  ≈ 32.75 MiB
+
+full KV =
+  17941 * 131072
+  ≈ 2242.63 MiB</code></pre>
+
+<p>KV saving：</p>
+
+<pre><code>1 - 32.75 / 2242.63
+≈ 98.54%</code></pre>
+
+<p>selected fetch：</p>
+
+<pre><code>selected bandwidth time ≈ 10.99 ms
+selected node RTT = 1 * 1.0 = 1.0 ms
+selected segment overhead = 12 * 0.15 = 1.8 ms
+
+selected fetch =
+  10.99 + 1.0 + 1.8
+  = 13.79 ms</code></pre>
+
+<p>如果：</p>
+
+<pre><code>routing wall-clock = 78.69 ms
+simulator excluded = 15.36 ms
+system routing = 63.33 ms
+decode startup = 15 ms</code></pre>
+
+<p>那么：</p>
+
+<pre><code>selected TTFT =
+  system routing + selected fetch + decode startup
+  = 63.33 + 13.79 + 15
+  = 92.12 ms</code></pre>
+
+<p>full fetch：</p>
+
+<pre><code>full bandwidth time ≈ 752.50 ms
+full node RTT = 4 * 1.0 = 4.0 ms
+full segment overhead = 4 * 0.15 = 0.6 ms
+
+full fetch =
+  752.50 + 4.0 + 0.6
+  = 757.10 ms</code></pre>
+
+<p>full TTFT：</p>
+
+<pre><code>full TTFT =
+  full fetch + decode startup
+  = 757.10 + 15
+  = 772.10 ms</code></pre>
+
+<p>TTFT saving：</p>
+
+<pre><code>1 - 92.12 / 772.10
+≈ 88.1%</code></pre>
+
+<p>这个例子说明：</p>
+
+<pre><code>selected path 多了 routing compute，
+但 selected path 少拉了大量 KV。
+省下来的 full KV fetch latency 远大于多出来的 routing compute，
+所以 TTFT 大幅下降。</code></pre>
+
+<hr>
+
+<h3 id="sec-10-14">10.14 给老师汇报的版本</h3>
+
+<p>可以这样讲：</p>
+
+<pre><code>我的评价不是只看速度，也不是只看答案。
+
+我同时评估四个方面：
+
+第一，selected_turn recall / precision / F1，
+用来证明路由选出来的 evidence 是否覆盖 QMSum 标注的 relevant turns。
+
+第二，answer F1，
+比较 full context、selected context 和 oracle evidence context 下的答案质量，
+证明 selective context 是否还能保持接近 full context 的回答能力。
+
+第三，KV saving 和 fetch latency saving，
+证明 selective routing 实际减少了需要跨节点传输的 KV 字节数和取数时间。
+
+第四，TTFT saving，
+估算 system routing compute + selected KV fetch + decode startup 后，
+到第一个 token 的时延是否低于 full KV fetch baseline。
+
+同时，我区分 simulator wall-clock 和 system-accounted routing time。
+本地 simulator 需要现场从完整 KV cache 切 candidate K；
+真实分布式设定里 chunk KV 应该已经物化在远端节点上。
+所以我把这部分 simulator-only key slicing 时间单独记录并从 system TTFT 中排除。</code></pre>
+
+<p>最后一句边界：</p>
+
+<pre><code>当前 TTFT 是 query-time fetch 到 first token 的估算，
+不是完整 end-to-end prefill + full answer generation latency。</code></pre>
+
+</body>
+</html>

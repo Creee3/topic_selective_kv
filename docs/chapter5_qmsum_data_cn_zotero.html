@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>第 5 章：QMSum 数据结构</title>
+<style>
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+  color: #1f2933;
+  line-height: 1.75;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 40px 28px 80px;
+  background: #ffffff;
+}
+h2 {
+  font-size: 24px;
+  margin: 0 0 24px;
+  border-bottom: 2px solid #d8dee9;
+  padding-bottom: 14px;
+}
+h3 {
+  font-size: 18px;
+  margin-top: 30px;
+  color: #243b53;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 6px;
+}
+p { margin: 12px 0; }
+code {
+  font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  background: #f3f4f6;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+pre {
+  background: #0f172a;
+  color: #e5e7eb;
+  padding: 14px 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.toc {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 24px 0 34px;
+}
+.toc h3 {
+  margin-top: 0;
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.toc ol { margin: 0; padding-left: 22px; }
+.toc li { margin: 4px 0; }
+hr {
+  border: 0;
+  border-top: 1px solid #e5e7eb;
+  margin: 28px 0;
+}
+a { color: #2563eb; text-decoration: none; }
+</style>
+</head>
+<body>
+<h2>第 5 章：QMSum 数据结构</h2>
+
+<div class="toc">
+<h3>目录</h3>
+<ol>
+  <li><a href="#sec-5-0">5.0 这一章到底在讲什么</a></li>
+  <li><a href="#sec-5-1">5.1 一条 meeting 的最外层</a></li>
+  <li><a href="#sec-5-2">5.2 meeting_transcripts：会议正文</a></li>
+  <li><a href="#sec-5-3">5.3 topic_list：会议主题标注</a></li>
+  <li><a href="#sec-5-4">5.4 specific_query_list：当前主线真正使用的 query 来源</a></li>
+  <li><a href="#sec-5-5">5.5 general_query_list：整场会议总结类问题</a></li>
+  <li><a href="#sec-5-6">5.6 两种 relevant_text_span 一定要分清</a></li>
+  <li><a href="#sec-5-7">5.7 answer 字段怎么用</a></li>
+  <li><a href="#sec-5-8">5.8 用真实命令解释你到底跑了多少 query</a></li>
+  <li><a href="#sec-5-9">5.9 从 QMSum 到工程对象的完整对应</a></li>
+  <li><a href="#sec-5-10">5.10 一个真实 case 的完整流程</a></li>
+  <li><a href="#sec-5-11">5.11 本章核心记忆</a></li>
+</ol>
+</div>
+
+<h3 id="sec-5-0">5.0 这一章到底在讲什么</h3>
+
+<p>第 4 章讲的是工程实体：</p>
+
+<pre><code>topic node
+virtual node
+chunk
+transfer segment</code></pre>
+
+<p>第 5 章往前退一步，讲这些实体最开始从 QMSum 数据集的哪些字段里来。</p>
+
+<p>一句话：</p>
+
+<pre><code>第 5 章要回答：
+QMSum 的一条 JSON 数据里有什么？
+这些字段分别在你的工程里承担什么角色？</code></pre>
+
+<p>你当前主线默认使用的是：</p>
+
+<pre><code>topic_selective_kv/data/qmsum_structured/train.jsonl</code></pre>
+
+<p>这个文件里每一行是一场 meeting，也就是一整场会议样本。</p>
+
+<hr>
+
+<h3 id="sec-5-1">5.1 一条 meeting 的最外层</h3>
+
+<p>用你本地真实样本 <code>train_00000</code> 举例：</p>
+
+<pre><code>meeting_id = train_00000
+num_turns = 506
+topics = 4
+specific_queries = 6
+general_queries = 1</code></pre>
+
+<p>它最外层大概是：</p>
+
+<pre><code>{
+  "dataset": "...",
+  "split": "...",
+  "meeting_idx": 0,
+  "meeting_id": "train_00000",
+  "num_turns": 506,
+  "meeting_transcripts": [...],
+  "specific_query_list": [...],
+  "general_query_list": [...],
+  "topic_list": [...]
+}</code></pre>
+
+<p>你可以把 <code>meeting</code> 想成：</p>
+
+<pre><code>一次完整实验 case 的原始世界。</code></pre>
+
+<p>代码里读取 meeting 的地方是：</p>
+
+<pre><code>meeting = load_qmsum_sample(args.data_path, doc_id=doc_id)</code></pre>
+
+<p>其中 <code>doc_id=0</code> 就读到 <code>train_00000</code>。</p>
+
+<hr>
+
+<h3 id="sec-5-2">5.2 meeting_transcripts：会议正文</h3>
+
+<p><code>meeting_transcripts</code> 是这场会议的所有发言 turn。</p>
+
+<p><code>train_00000</code> 有：</p>
+
+<pre><code>506 个 turns</code></pre>
+
+<p>一个 turn 长这样：</p>
+
+<pre><code>{
+  "turn_idx": 0,
+  "speaker": "Project Manager",
+  "content": "Yep . Soon as I get this ...",
+  "text": "Project Manager: Yep . Soon as I get this ..."
+}</code></pre>
+
+<p>逐个解释：</p>
+
+<pre><code>turn_idx:
+  这是第几个 turn，从 0 开始。
+
+speaker:
+  谁说的话。
+
+content:
+  这个人说的原始内容。
+
+text:
+  structured 数据整理好的完整文本，一般是 speaker + content。</code></pre>
+
+<p>真实 turn 0 是：</p>
+
+<pre><code>TURN 0 | Project Manager:
+Yep . Soon as I get this . Okay . This is our last meeting .
+Um I'll go ahead and go through the minutes from the previous meeting ...</code></pre>
+
+<p>真实 turn 1 是：</p>
+
+<pre><code>TURN 1 | User Interface:
+The prototype discussion .</code></pre>
+
+<p>真实 turn 39 是：</p>
+
+<pre><code>TURN 39 | Industrial Designer:
+I'd say a bit smaller would probably be nice .</code></pre>
+
+<p>所以 turn 是 QMSum 里最基础的正文单位。</p>
+
+<p>后面的 <code>relevant_text_span</code> 都是在指 turn 编号。比如：</p>
+
+<pre><code>[0, 39]</code></pre>
+
+<p>意思不是字符 0 到字符 39，也不是 token 0 到 token 39，而是：</p>
+
+<pre><code>turn 0 到 turn 39。</code></pre>
+
+<hr>
+
+<h3 id="sec-5-3">5.3 topic_list：会议主题标注</h3>
+
+<p><code>topic_list</code> 是 QMSum 给这场会议标好的主题列表。</p>
+
+<p><code>train_00000</code> 有 4 个 topic：</p>
+
+<pre><code>[
+  {
+    "topic_idx": 0,
+    "topic": "Remote control prototype introduction",
+    "relevant_text_span": [[0, 53]]
+  },
+  {
+    "topic_idx": 1,
+    "topic": "Product evaluation discussion",
+    "relevant_text_span": [[54, 283]]
+  },
+  {
+    "topic_idx": 2,
+    "topic": "Product cost discussion",
+    "relevant_text_span": [[284, 459]]
+  },
+  {
+    "topic_idx": 3,
+    "topic": "Project and overall process review",
+    "relevant_text_span": [[460, 505]]
+  }
+]</code></pre>
+
+<p>这说明这场会议被数据集切成了 4 个大主题：</p>
+
+<pre><code>turn 0-53:
+  Remote control prototype introduction
+
+turn 54-283:
+  Product evaluation discussion
+
+turn 284-459:
+  Product cost discussion
+
+turn 460-505:
+  Project and overall process review</code></pre>
+
+<p>这 4 个 topic 刚好覆盖了 turn 0 到 turn 505，而这场会议总共有 506 个 turn。所以这个样本里没有漏掉的 turn，也就不会额外补 <code>gap topic</code>。</p>
+
+<p><code>topic_list</code> 在你的工程里主要用来构造第 4 章讲的 <code>topic node</code>：</p>
+
+<pre><code>topic_list
+-> topic node
+-> topic turns
+-> coarse routing 的候选语义节点</code></pre>
+
+<hr>
+
+<h3 id="sec-5-4">5.4 specific_query_list：当前主线真正使用的 query 来源</h3>
+
+<p><code>specific_query_list</code> 是这场会议对应的具体问答任务。</p>
+
+<p><code>train_00000</code> 里有 6 个 specific query。</p>
+
+<p>第 0 个 query 是：</p>
+
+<pre><code>{
+  "query_idx": 0,
+  "query": "How Did Project Manager and User Interface introduce the prototype of the remote control?",
+  "answer": "Project Manager introduced that the prototype incorporated fashion trends ...",
+  "relevant_text_span": [[0, 39]]
+}</code></pre>
+
+<p>逐个解释：</p>
+
+<pre><code>query_idx:
+  这个 query 在当前 meeting 里的编号。
+
+query:
+  用户问题，也是在线 routing 的输入。
+
+answer:
+  QMSum 给的参考答案，用来评估 answer F1。
+
+relevant_text_span:
+  回答这个 query 需要看的证据 turn 区间。</code></pre>
+
+<p>这个 query 问的是：</p>
+
+<pre><code>Project Manager 和 User Interface 怎么介绍遥控器原型？</code></pre>
+
+<p>证据范围是：</p>
+
+<pre><code>turn 0 到 turn 39</code></pre>
+
+<p>它落在 topic 0 里面：</p>
+
+<pre><code>topic 0 覆盖 turn 0-53
+query 0 需要 turn 0-39</code></pre>
+
+<p>所以理想情况下，coarse routing 应该选中：</p>
+
+<pre><code>Remote control prototype introduction</code></pre>
+
+<p>也就是 topic 0。</p>
+
+<p>再看 query 1：</p>
+
+<pre><code>{
+  "query_idx": 1,
+  "query": "How did Marketing design the product evaluation?",
+  "relevant_text_span": [[54, 61]]
+}</code></pre>
+
+<p>它问的是：</p>
+
+<pre><code>Marketing 是怎么设计产品评估的？</code></pre>
+
+<p>证据范围是：</p>
+
+<pre><code>turn 54 到 turn 61</code></pre>
+
+<p>真实 turn 54 开头是：</p>
+
+<pre><code>TURN 54 | Marketing:
+I do . Okay . You guys are gonna help me do an evaluation of the criteria ...</code></pre>
+
+<p>这个范围落在：</p>
+
+<pre><code>topic 1 = Product evaluation discussion
+covers turn 54-283</code></pre>
+
+<p>所以 query 1 理想情况下应该路由到 topic 1。</p>
+
+<p>再看 query 4：</p>
+
+<pre><code>{
+  "query_idx": 4,
+  "query": "What did the team discuss about the product cost?",
+  "relevant_text_span": [[306, 449]]
+}</code></pre>
+
+<p>它问的是：</p>
+
+<pre><code>团队讨论了哪些产品成本？</code></pre>
+
+<p>证据范围是：</p>
+
+<pre><code>turn 306 到 turn 449</code></pre>
+
+<p>它落在：</p>
+
+<pre><code>topic 2 = Product cost discussion
+covers turn 284-459</code></pre>
+
+<p>所以 query 4 理想情况下应该路由到 topic 2。</p>
+
+<p>当前主线主要使用的就是 <code>specific_query_list</code>：</p>
+
+<pre><code>specific_queries = meeting.get("specific_query_list", [])</code></pre>
+
+<p>所以不是“只用一种 query”，而是：</p>
+
+<pre><code>使用 specific_query_list 这个字段里的多条 query。</code></pre>
+
+<hr>
+
+<h3 id="sec-5-5">5.5 general_query_list：整场会议总结类问题</h3>
+
+<p><code>general_query_list</code> 也是 QMSum 数据集自带的字段，但它不是你当前主线的重点。</p>
+
+<p><code>train_00000</code> 里的 general query 是：</p>
+
+<pre><code>{
+  "query_idx": 0,
+  "query": "Summarize the whole meeting.",
+  "answer": "Firstly, Project Manager reviewed the overall process ..."
+}</code></pre>
+
+<p>它问的是整场会议总结，不是某个局部细节。</p>
+
+<p>这种 query 的证据范围通常非常大，甚至横跨整场 meeting。它不像 specific query 那样明确告诉你：</p>
+
+<pre><code>回答这个问题主要看 turn 54 到 turn 61。</code></pre>
+
+<p>所以它不太适合当前主线最关心的证据定位评估：</p>
+
+<pre><code>selected chunks / selected turns 有没有覆盖 gold evidence turns？</code></pre>
+
+<p>一句话：</p>
+
+<pre><code>specific_query_list:
+  当前主线真正跑的 query 来源。
+
+general_query_list:
+  QMSum 也提供的整场会议总结问题，但当前主线基本不是重点。</code></pre>
+
+<hr>
+
+<h3 id="sec-5-6">5.6 两种 relevant_text_span 一定要分清</h3>
+
+<p>这是第五章最容易混的地方。</p>
+
+<p><code>topic_list</code> 里有 <code>relevant_text_span</code>：</p>
+
+<pre><code>{
+  "topic": "Remote control prototype introduction",
+  "relevant_text_span": [[0, 53]]
+}</code></pre>
+
+<p>它表示：</p>
+
+<pre><code>这个 topic 覆盖 turn 0 到 turn 53。</code></pre>
+
+<p>用途是：</p>
+
+<pre><code>构造 topic node。</code></pre>
+
+<p><code>specific_query_list</code> 里也有 <code>relevant_text_span</code>：</p>
+
+<pre><code>{
+  "query": "How Did Project Manager and User Interface introduce the prototype?",
+  "relevant_text_span": [[0, 39]]
+}</code></pre>
+
+<p>它表示：</p>
+
+<pre><code>回答这个具体 query 需要看 turn 0 到 turn 39。</code></pre>
+
+<p>用途是：</p>
+
+<pre><code>评价 selected chunks / selected turns 是否覆盖了正确证据。</code></pre>
+
+<p>一句话区分：</p>
+
+<pre><code>topic_list.relevant_text_span:
+  topic 的范围。
+
+specific_query.relevant_text_span:
+  query 的答案证据范围。</code></pre>
+
+<p>在真实例子里：</p>
+
+<pre><code>topic 0:
+  Remote control prototype introduction
+  span = [0, 53]
+
+query 0:
+  How Did Project Manager and User Interface introduce the prototype?
+  evidence span = [0, 39]</code></pre>
+
+<p>query evidence 是 topic 范围里的一个更具体子范围。</p>
+
+<hr>
+
+<h3 id="sec-5-7">5.7 answer 字段怎么用</h3>
+
+<p><code>specific_query_list</code> 里的 <code>answer</code> 是 QMSum 给的参考答案。</p>
+
+<p>它不是 routing 输入。在线路由时，系统不应该提前知道答案。</p>
+
+<p>它主要用于最后评估 answer F1：</p>
+
+<pre><code>gold_answer = query_info.get("answer", "").strip()</code></pre>
+
+<p>所以三者分工是：</p>
+
+<pre><code>query:
+  在线输入，用来做 routing。
+
+relevant_text_span:
+  gold evidence，用来算 selected-turn recall / precision / F1。
+
+answer:
+  gold answer，用来算 answer F1。</code></pre>
+
+<hr>
+
+<h3 id="sec-5-8">5.8 用真实命令解释你到底跑了多少 query</h3>
+
+<p>你给过这个运行命令：</p>
+
+<pre><code>START_DOC=0 END_DOC=20 MAX_QUERIES=5 GPU_ID=0 \
+CASE_SUMMARY_TAG=queryq_cache_0_20_q5 \
+LOG_DIR=logs/qmsum_queryq_cache_0_20_q5 \
+bash scripts_qmsum/run_qmsum_current_mainline.sh</code></pre>
+
+<p>这里千万不要理解成：</p>
+
+<pre><code>只用了一种 query。</code></pre>
+
+<p>准确理解是：</p>
+
+<pre><code>START_DOC=0 END_DOC=20:
+  跑 doc_id = 0 到 19。
+  也就是最多 20 场 meeting。
+
+MAX_QUERIES=5:
+  每场 meeting 最多取前 5 条 specific queries。
+
+所以最多 query case 数是：
+  20 meetings * 5 queries = 100 query cases。</code></pre>
+
+<p>这些 query 都来自：</p>
+
+<pre><code>specific_query_list</code></pre>
+
+<p>而不是来自：</p>
+
+<pre><code>general_query_list</code></pre>
+
+<p>所以正确说法是：</p>
+
+<pre><code>你跑了很多条 query；
+只是这些 query 都来自 QMSum 的 specific_query_list 这个字段。</code></pre>
+
+<p>“数据集已经划分好了”的意思是：</p>
+
+<pre><code>QMSum JSON 本身已经把问题分成：
+  specific_query_list
+  general_query_list
+
+你的代码当前选择使用 specific_query_list。</code></pre>
+
+<hr>
+
+<h3 id="sec-5-9">5.9 从 QMSum 到工程对象的完整对应</h3>
+
+<p>现在把第五章和第四章接起来：</p>
+
+<pre><code>meeting
+-> 一整场会议样本
+
+meeting_transcripts
+-> 所有 turns
+-> 拼成 prompt_text
+-> 生成 turn_boundaries
+-> 后面切 chunks
+
+topic_list
+-> 构造 topic nodes
+-> 每个 topic node 覆盖一组 turns
+-> coarse routing 的候选语义节点
+
+specific_query_list
+-> 每条 query 是一次实验 case
+-> query 文本用于 routing
+-> query 的 relevant_text_span 用于证据评估
+-> query 的 answer 用于 answer F1
+
+topic_list.relevant_text_span
+-> topic 覆盖范围
+
+specific_query.relevant_text_span
+-> query 答案证据范围</code></pre>
+
+<hr>
+
+<h3 id="sec-5-10">5.10 一个真实 case 的完整流程</h3>
+
+<p>拿 <code>train_00000</code> 的 query 0 串一下。</p>
+
+<p>原始数据：</p>
+
+<pre><code>meeting_id = train_00000
+
+topic 0:
+  Remote control prototype introduction
+  span = [0, 53]
+
+query 0:
+  How Did Project Manager and User Interface introduce the prototype?
+  evidence span = [0, 39]</code></pre>
+
+<p>工程流程：</p>
+
+<pre><code>1. 读入 meeting train_00000。
+2. 取出 506 个 meeting_transcripts。
+3. 用 topic_list 构造 4 个 topic nodes。
+4. query 0 到来。
+5. lexical/BM25 粗路由应该选中 topic 0。
+6. 系统只在 topic 0 覆盖的 turns 0-53 里切 chunk。
+7. Q-K fine routing 选若干 chunks。
+8. selected chunks 映射回 selected turns。
+9. 和 query 0 的 gold relevant_text_span=[0,39] 比。
+10. 如果 selected turns 覆盖了 0-39 里的关键 turns，selected-turn recall 就高。
+11. 用 selected evidence 生成答案。
+12. 和 answer 字段算 answer F1。</code></pre>
+
+<hr>
+
+<h3 id="sec-5-11">5.11 本章核心记忆</h3>
+
+<pre><code>meeting:
+  一整场会议样本，比如 train_00000。
+
+meeting_transcripts:
+  会议正文，由很多 turn 组成。
+
+turn:
+  一个 speaker 的一轮发言，是 relevant_text_span 指向的基本单位。
+
+topic_list:
+  数据集标好的会议主题列表。
+  用来构造 topic node。
+
+topic_list.relevant_text_span:
+  topic 覆盖哪些 turns。
+
+specific_query_list:
+  当前主线真正使用的 query 来源。
+
+specific_query.query:
+  在线输入问题，用来做 routing。
+
+specific_query.relevant_text_span:
+  回答这个 query 的证据 turn 范围。
+  用来算 selected-turn recall / precision / F1。
+
+specific_query.answer:
+  参考答案，用来算 answer F1。
+
+general_query_list:
+  整场会议总结类问题。
+  当前主线基本不是重点。</code></pre>
+
+<p>一句话总结：</p>
+
+<pre><code>QMSum 给了你会议正文、主题标注、具体问题、证据 turn 和参考答案；
+你的工程把 topic_list 变成 topic nodes，
+把 specific_query_list 里的每条 query 当作一次在线请求，
+把 query 的 relevant_text_span 当作 gold evidence，
+最后评估 selective KV routing 有没有选到该看的会议内容。</code></pre>
+
+</body>
+</html>

@@ -1,0 +1,745 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>第 8 章：Q-K 前的候选池控制与执行准备</title>
+<style>
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+  color: #1f2933;
+  line-height: 1.78;
+  max-width: 940px;
+  margin: 0 auto;
+  padding: 40px 28px 84px;
+  background: #ffffff;
+}
+h2 {
+  font-size: 25px;
+  margin: 0 0 24px;
+  border-bottom: 2px solid #d8dee9;
+  padding-bottom: 14px;
+}
+h3 {
+  font-size: 18px;
+  margin-top: 32px;
+  color: #243b53;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 6px;
+}
+p { margin: 12px 0; }
+code {
+  font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  background: #f3f4f6;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+pre {
+  background: #0f172a;
+  color: #e5e7eb;
+  padding: 14px 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.toc {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 24px 0 34px;
+}
+.toc h3 {
+  margin-top: 0;
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.toc ol { margin: 0; padding-left: 22px; }
+.toc li { margin: 4px 0; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0 22px;
+  font-size: 14px;
+}
+th, td {
+  border: 1px solid #d8dee9;
+  padding: 8px 10px;
+  vertical-align: top;
+}
+th {
+  background: #f1f5f9;
+  text-align: left;
+}
+.note {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 16px 0;
+}
+.key {
+  background: #ecfdf5;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 16px 0;
+}
+hr {
+  border: 0;
+  border-top: 1px solid #e5e7eb;
+  margin: 30px 0;
+}
+a { color: #2563eb; text-decoration: none; }
+</style>
+</head>
+<body>
+<h2>第 8 章：Q-K 前的候选池控制与执行准备</h2>
+
+<div class="toc">
+<h3>目录</h3>
+<ol>
+  <li><a href="#sec-8-0">8.0 本章一句话</a></li>
+  <li><a href="#sec-8-1">8.1 本章在系统里的位置</a></li>
+  <li><a href="#sec-8-2">8.2 当前主线的真实配置</a></li>
+  <li><a href="#sec-8-3">8.3 第八章的完整漏斗</a></li>
+  <li><a href="#sec-8-4">8.4 topic filter：只保留选中 topic 内的 chunk</a></li>
+  <li><a href="#sec-8-5">8.5 dynamic route budget：决定最后要选多少 chunk</a></li>
+  <li><a href="#sec-8-6">8.6 lexical candidate prefilter：便宜筛选 Q-K 候选</a></li>
+  <li><a href="#sec-8-7">8.7 dynamic candidate pool：按 query 类型继续控池</a></li>
+  <li><a href="#sec-8-8">8.8 coarse segment gate：按连续段做保护性裁剪</a></li>
+  <li><a href="#sec-8-9">8.9 Q-K 执行准备：batching 与 cache</a></li>
+  <li><a href="#sec-8-10">8.10 一个完整数字例子</a></li>
+  <li><a href="#sec-8-11">8.11 固定参数、动态结果、跨数据集风险</a></li>
+  <li><a href="#sec-8-12">8.12 第八章和第九章的边界</a></li>
+  <li><a href="#sec-8-13">8.13 给老师汇报的版本</a></li>
+</ol>
+</div>
+
+<h3 id="sec-8-0">8.0 本章一句话</h3>
+
+<p>第八章讲的不是 Q-K 打分公式，而是 Q-K 之前的系统准备层。</p>
+
+<pre><code>第八章 =
+  在真正 Q-K 精打分之前，
+  先把候选 chunk 数量压下来，
+  再把 Q-K 计算准备得更快。</code></pre>
+
+<p>也就是说，本章回答两个问题：</p>
+
+<pre><code>问题 1：哪些 chunk 有资格进入 expensive Q-K scoring？
+问题 2：进入 Q-K 前，怎样避免重复计算、降低 routing compute？</code></pre>
+
+<div class="key">
+  <p><strong>核心记忆：</strong>第八章是候选池控制和执行优化，不是 attention 原理本身。attention / Q-K affinity / layer-head 聚合放在第九章讲。</p>
+</div>
+
+<hr>
+
+<h3 id="sec-8-1">8.1 本章在系统里的位置</h3>
+
+<p>前面第七章已经做完 coarse routing。第七章输入 query，输出 selected topic。</p>
+
+<pre><code>第七章：
+query
+-> lexical / BM25 粗路由
+-> selected_topic_ids</code></pre>
+
+<p>但是，一个 topic 里面仍然可能有很多 chunk。比如：</p>
+
+<pre><code>selected topic = topic 3
+
+topic 3 里面可能有：
+chunk 0
+chunk 1
+chunk 2
+...
+chunk 520</code></pre>
+
+<p>如果直接对这 521 个 chunk 全部做 Q-K，会很慢。第八章就是在这里接手：</p>
+
+<pre><code>topic 内候选 chunks
+-> cheap lexical prefilter
+-> dynamic candidate pool
+-> coarse segment gate
+-> Q-K execution cache / batching
+-> 交给第九章 exact Q-K scoring</code></pre>
+
+<p>所以本章是第七章和第九章之间的桥。</p>
+
+<hr>
+
+<h3 id="sec-8-2">8.2 当前主线的真实配置</h3>
+
+<p>当前主线配置在 <code>qmsum_mainline_config.py</code> 的 <code>current</code> profile 里。</p>
+
+<pre><code>"dynamic_route_budget": True,
+"dynamic_summary_top_k": 16,
+"dynamic_detail_top_k": 12,
+"dynamic_balanced_top_k": 12,
+
+"dynamic_candidate_pool_budget": True,
+"dynamic_candidate_pool_budget_map": "summary:96,detail:48,balanced:56,default:56",
+"dynamic_candidate_pool_min_keep": 24,
+
+"route_candidate_prefilter": "lexical",
+"route_candidate_prefilter_factor": 6,
+"route_candidate_prefilter_min_keep": 48,
+"route_candidate_prefilter_max_keep": 128,
+
+"route_coarse_segment_gate": "lexical",
+"route_coarse_segment_size": 4,
+"route_coarse_segment_keep_ratio": 0.65,
+"route_coarse_segment_min_keep": 64,
+
+"qk_score_batch_size": 64,
+"cache_candidate_keys": True,
+"cache_query_q": True</code></pre>
+
+<p>这些参数大部分是工程超参数。它们不是模型学出来的，也不是 QMSum 数据集原生给的。</p>
+
+<pre><code>固定配置：
+factor = 6
+min_keep = 48
+max_keep = 128
+batch_size = 64
+
+动态结果：
+具体保留多少 candidate，
+会根据 query 类型、topic 内候选数、以及 gate 是否触发而变化。</code></pre>
+
+<hr>
+
+<h3 id="sec-8-3">8.3 第八章的完整漏斗</h3>
+
+<p>这一章最适合用漏斗来记。</p>
+
+<pre><code>全会议 chunks
+  ↓
+第七章已经选出的 topic
+  ↓
+topic filter
+  ↓
+lexical candidate prefilter
+  ↓
+dynamic candidate pool
+  ↓
+coarse segment gate
+  ↓
+query-Q cache / candidate-key cache / batching
+  ↓
+第九章 exact Q-K scoring</code></pre>
+
+<p>每一层都在做一件很具体的事。</p>
+
+<table>
+  <tr>
+    <th>步骤</th>
+    <th>作用</th>
+    <th>是否改变 Q-K 公式</th>
+  </tr>
+  <tr>
+    <td>topic filter</td>
+    <td>只保留 selected topic 内的 chunk</td>
+    <td>不改变</td>
+  </tr>
+  <tr>
+    <td>lexical prefilter</td>
+    <td>用便宜 BM25 先筛掉一批明显不相关 chunk</td>
+    <td>不改变</td>
+  </tr>
+  <tr>
+    <td>dynamic candidate pool</td>
+    <td>按 query 类型控制 Q-K 前候选池大小</td>
+    <td>不改变</td>
+  </tr>
+  <tr>
+    <td>coarse segment gate</td>
+    <td>按连续 chunk 段做候选池保护性裁剪</td>
+    <td>不改变</td>
+  </tr>
+  <tr>
+    <td>query-Q cache / batching</td>
+    <td>减少重复计算，提高 Q-K 执行效率</td>
+    <td>不改变</td>
+  </tr>
+</table>
+
+<p>这里最容易误解的一点是：第八章很多东西会影响最终结果，因为它决定哪些 chunk 能进入 Q-K；但它并没有修改 Q-K 分数公式。</p>
+
+<hr>
+
+<h3 id="sec-8-4">8.4 topic filter：只保留选中 topic 内的 chunk</h3>
+
+<p>第七章选出 topic 后，第八章第一步就是过滤 candidate。</p>
+
+<pre><code>selected_topic_ids = [3]</code></pre>
+
+<p>原始候选可能是：</p>
+
+<pre><code>chunk 0: topic 0
+chunk 1: topic 1
+chunk 2: topic 3
+chunk 3: topic 3
+chunk 4: topic 5</code></pre>
+
+<p>topic filter 后只留下：</p>
+
+<pre><code>chunk 2: topic 3
+chunk 3: topic 3</code></pre>
+
+<p>代码逻辑对应：</p>
+
+<pre><code>candidates_to_score = [
+    cand
+    for cand in route_candidates
+    if any(int(topic_id) in selected_topic_set for topic_id in cand["topic_ids"])
+]</code></pre>
+
+<p>这一步没有复杂 scoring，只是先把范围限制在粗路由选中的 topic 里面。</p>
+
+<hr>
+
+<h3 id="sec-8-5">8.5 dynamic route budget：决定最后要选多少 chunk</h3>
+
+<p>这一步决定第九章最终要选多少个 chunk。</p>
+
+<pre><code>summary-style query  -> effective_route_top_k = 16
+detail-style query   -> effective_route_top_k = 12
+balanced-style query -> effective_route_top_k = 12</code></pre>
+
+<p>注意，这里的 <code>summary/detail/balanced</code> 是工程内部为了预算控制做的文本启发式分类，不是 QMSum 的 <code>general_query_list/specific_query_list</code>。</p>
+
+<pre><code>QMSum 数据字段：
+specific_query_list
+general_query_list
+
+当前主线使用：
+specific_query_list
+
+工程内部预算类型：
+detail / summary / balanced</code></pre>
+
+<p>所以，一个 query 可以来自 <code>specific_query_list</code>，但预算类型仍然是 <code>summary</code>。</p>
+
+<pre><code>query:
+Summarize the presentation and discussion about the design of the remote.
+
+数据来源：
+specific_query_list
+
+预算类型：
+summary
+
+最终 chunk 预算：
+effective_route_top_k = 16</code></pre>
+
+<p>另一个 detail 例子：</p>
+
+<pre><code>query:
+What did Marketing think about Project Manager's system?
+
+预算类型：
+detail
+
+最终 chunk 预算：
+effective_route_top_k = 12</code></pre>
+
+<hr>
+
+<h3 id="sec-8-6">8.6 lexical candidate prefilter：便宜筛选 Q-K 候选</h3>
+
+<p>这是第八章第一层真正的候选裁剪。</p>
+
+<pre><code>route_candidate_prefilter = lexical</code></pre>
+
+<p>意思是：在 expensive Q-K 之前，先用便宜的 lexical / BM25 分数筛一批 candidate chunk。</p>
+
+<p>当前固定参数是：</p>
+
+<pre><code>route_candidate_prefilter_factor = 6
+route_candidate_prefilter_min_keep = 48
+route_candidate_prefilter_max_keep = 128</code></pre>
+
+<p>它们都是预先设置好的工程超参数。不是模型自动学的，也不是每个 query 重新调出来的。</p>
+
+<p>计算公式可以记成：</p>
+
+<pre><code>prefilter_keep =
+  min(
+    num_candidates,
+    clamp(effective_route_top_k * factor, min_keep, max_keep)
+  )</code></pre>
+
+<p>其中：</p>
+
+<pre><code>factor:
+  最终 top-k 的放大倍数。
+  例如最后要选 12 个 chunk，先给 Q-K 72 个候选。
+
+min_keep:
+  防止候选池太小。
+  当前至少保留 48 个。
+
+max_keep:
+  防止候选池太大。
+  当前最多保留 128 个。
+
+num_candidates:
+  当前 topic filter 后实际有多少候选。
+  最终不能超过这个数。</code></pre>
+
+<p>一个 detail query 的具体计算：</p>
+
+<pre><code>effective_route_top_k = 12
+factor = 6
+min_keep = 48
+max_keep = 128
+num_candidates = 521
+
+12 * 6 = 72
+max(48, 72) = 72
+min(128, 72) = 72
+min(521, 72) = 72
+
+所以 lexical prefilter 后保留 72 个 chunk。</code></pre>
+
+<p>这里的 72 不是最终答案 chunk，而是进入后续候选池控制和 Q-K scoring 的候选。</p>
+
+<div class="note">
+  <p><strong>容易混淆：</strong><code>factor=6</code>、<code>min_keep=48</code>、<code>max_keep=128</code> 是固定配置；但是最后保留多少个 chunk 是动态算出来的，因为 <code>effective_route_top_k</code> 和 <code>num_candidates</code> 会变。</p>
+</div>
+
+<hr>
+
+<h3 id="sec-8-7">8.7 dynamic candidate pool：按 query 类型继续控池</h3>
+
+<p>lexical prefilter 后，系统还会根据 query 类型继续控制 exact Q-K 前的候选池大小。</p>
+
+<pre><code>dynamic_candidate_pool_budget_map =
+  summary:96
+  detail:48
+  balanced:56
+  default:56</code></pre>
+
+<p>这一步的目的不是换一种 scoring，而是把 Q-K 前的候选数量控制在一个更符合 query 范围的大小。</p>
+
+<pre><code>summary query:
+  问题范围大，需要覆盖更多证据。
+  Q-K 前最多留 96 个候选。
+
+detail query:
+  问题范围窄，通常只找具体事实/观点。
+  Q-K 前最多留 48 个候选。
+
+balanced query:
+  中间情况。
+  Q-K 前最多留 56 个候选。</code></pre>
+
+<p>继续用刚才 detail 例子：</p>
+
+<pre><code>topic filter 后：521 个 chunk
+lexical prefilter 后：72 个 chunk
+dynamic candidate pool：
+  detail target = 48
+
+所以：
+72 -> 48</code></pre>
+
+<p>如果是 summary query，可能是：</p>
+
+<pre><code>effective_route_top_k = 16
+lexical prefilter:
+  16 * 6 = 96
+
+dynamic candidate pool:
+  summary target = 96
+
+所以：
+96 -> 96</code></pre>
+
+<p>也就是说，dynamic candidate pool 有时会继续裁剪，有时不会裁剪。</p>
+
+<hr>
+
+<h3 id="sec-8-8">8.8 coarse segment gate：按连续段做保护性裁剪</h3>
+
+<p><code>coarse segment gate</code> 的核心思想是：会议证据通常是连续的，不一定应该只按单个 chunk 看。</p>
+
+<pre><code>route_coarse_segment_size = 4
+route_coarse_segment_keep_ratio = 0.65
+route_coarse_segment_min_keep = 64</code></pre>
+
+<p><code>segment_size=4</code> 的意思是每 4 个相邻 chunk 看成一个小段：</p>
+
+<pre><code>segment 0: chunk 0, 1, 2, 3
+segment 1: chunk 4, 5, 6, 7
+segment 2: chunk 8, 9, 10, 11</code></pre>
+
+<p>然后系统给这些 segment 一个 lexical 分数，优先保留更可能相关的连续段。</p>
+
+<p>为什么需要连续段？因为会议证据经常像这样出现：</p>
+
+<pre><code>chunk 20: 问题被提出
+chunk 21: 回答开始
+chunk 22: 解释原因
+chunk 23: 得出结论</code></pre>
+
+<p>如果只保留单个 chunk，可能会断掉上下文。segment gate 想尽量保留连续证据。</p>
+
+<p><code>route_coarse_segment_min_keep = 64</code> 的单位是 chunk，不是 segment。</p>
+
+<pre><code>route_coarse_segment_min_keep = 64
+
+意思是：
+coarse segment gate 之后至少保留 64 个 candidate chunks。
+
+不是：
+至少保留 64 个 segments。</code></pre>
+
+<p>如果 <code>segment_size=4</code>，那么 64 个 chunk 大概相当于 16 个 segment。</p>
+
+<pre><code>64 chunks / 4 chunks per segment = 16 segments</code></pre>
+
+<p>所以如果当前候选池只有 48 个 chunk，gate 通常不会继续裁剪：</p>
+
+<pre><code>当前候选 = 48
+min_keep = 64
+
+已经不多了，所以 skip no prune。</code></pre>
+
+<p>如果当前候选是 96 个 chunk，它可能裁到 64：</p>
+
+<pre><code>96 -> 64</code></pre>
+
+<p>这一步的作用是：既想继续降低 Q-K 计算量，又不希望把连续证据切得太碎。</p>
+
+<hr>
+
+<h3 id="sec-8-9">8.9 Q-K 执行准备：batching 与 cache</h3>
+
+<p>前面几步结束后，系统得到 <code>candidates_to_score</code>。这些候选会进入第九章 exact Q-K scoring。</p>
+
+<p>但现在主线还做了三个执行优化：</p>
+
+<pre><code>qk_score_batch_size = 64
+cache_candidate_keys = True
+cache_query_q = True</code></pre>
+
+<p>这三个东西不改变 Q-K 分数，只改变执行方式和速度。</p>
+
+<table>
+  <tr>
+    <th>参数</th>
+    <th>作用</th>
+    <th>公平性判断</th>
+  </tr>
+  <tr>
+    <td><code>qk_score_batch_size=64</code></td>
+    <td>一次最多把 64 个 candidate chunk 放进一批 Q-K 计算</td>
+    <td>公平，只改变 GPU 执行并行度，不改变分数</td>
+  </tr>
+  <tr>
+    <td><code>cache_candidate_keys=True</code></td>
+    <td>candidate chunk 的 K 可以缓存，避免重复准备</td>
+    <td>公平，但如果其他 Q-K baseline 需要 K，也应允许同样缓存</td>
+  </tr>
+  <tr>
+    <td><code>cache_query_q=True</code></td>
+    <td>同一个 query 的 Q 只算一次，后续 batch 复用</td>
+    <td>公平，因为 Q 只由 query 和模型决定，不由 candidate 决定</td>
+  </tr>
+</table>
+
+<p><code>cache_query_q=True</code> 是这次 TTFT 大幅下降的关键。</p>
+
+<pre><code>以前：
+第 1 批 candidate：算一次 query Q
+第 2 批 candidate：又算一次 query Q
+第 3 批 candidate：又算一次 query Q
+
+现在：
+先算一次 query Q
+第 1 批 candidate 复用
+第 2 批 candidate 复用
+第 3 批 candidate 复用</code></pre>
+
+<p>这个做法合理，因为同一个 query 的 Q 不取决于 candidate chunk。</p>
+
+<pre><code>score(chunk A) = Q(query) · K(chunk A)
+score(chunk B) = Q(query) · K(chunk B)
+score(chunk C) = Q(query) · K(chunk C)
+
+这里的 Q(query) 是同一个。</code></pre>
+
+<p>所以 query-Q cache 是 execution-side optimization，不是新的打分公式。</p>
+
+<hr>
+
+<h3 id="sec-8-10">8.10 一个完整数字例子</h3>
+
+<p>假设当前 query 是：</p>
+
+<pre><code>What did Marketing think about Project Manager's system?</code></pre>
+
+<p>它是 detail-style query。粗路由选中了：</p>
+
+<pre><code>selected topic = topic 3</code></pre>
+
+<p>topic 3 里有 521 个 candidate chunks。</p>
+
+<pre><code>1. topic filter
+   topic 3 内候选数 = 521
+
+2. dynamic route budget
+   detail -> effective_route_top_k = 12
+
+3. lexical candidate prefilter
+   factor = 6
+   12 * 6 = 72
+   min_keep = 48
+   max_keep = 128
+   所以 521 -> 72
+
+4. dynamic candidate pool
+   detail target = 48
+   所以 72 -> 48
+
+5. coarse segment gate
+   当前只有 48 个 chunk
+   min_keep = 64
+   所以通常不继续裁剪
+   48 -> 48
+
+6. Q-K execution prep
+   batch_size = 64
+   cache_query_q = True
+   cache_candidate_keys = True
+
+7. 进入第九章
+   对 48 个 chunk 做 exact Q-K
+   最后选 top 12 个 chunk</code></pre>
+
+<p>对应输出字段可以这样读：</p>
+
+<pre><code>query_budget_type = detail
+effective_route_top_k = 12
+
+num_candidates_before_prefilter = 521
+num_candidates_after_prefilter = 72
+num_candidates_after_dynamic_pool = 48
+num_candidates_after_coarse_segment_gate = 48
+num_candidates_scored_qk = 48</code></pre>
+
+<p>这个例子最能说明第八章的作用：Q-K 并没有面对 521 个 chunk，而是只面对 48 个经过筛选的候选。</p>
+
+<hr>
+
+<h3 id="sec-8-11">8.11 固定参数、动态结果、跨数据集风险</h3>
+
+<p>这里要特别小心。当前这些参数是 QMSum current profile 的固定工程超参数。</p>
+
+<pre><code>factor = 6
+min_keep = 48
+max_keep = 128
+detail pool = 48
+summary pool = 96
+balanced pool = 56
+segment_min_keep = 64</code></pre>
+
+<p>它们不是通用真理，也不是所有数据集都一定最优。</p>
+
+<p>为什么换数据集可能有问题？因为这些参数依赖当前实验形态：</p>
+
+<pre><code>QMSum 会议长度
+topic 内 chunk 数量
+chunk_size = 128
+specific query 的证据范围
+GPU 能承受的 Q-K scoring 数量
+当前 TTFT / F1 trade-off 目标</code></pre>
+
+<p>举几个例子：</p>
+
+<pre><code>如果另一个数据集 topic 内只有 30 个 chunk：
+  min_keep=48 基本没有意义，最后可能全保留。
+
+如果另一个数据集 topic 内有 3000 个 chunk：
+  max_keep=128 可能太小，证据召回会掉。
+
+如果另一个数据集的问题都很宽：
+  detail=48 可能不够。
+
+如果另一个数据集的问题都很窄：
+  summary=96 可能浪费。</code></pre>
+
+<p>所以论文里更稳妥的说法是：</p>
+
+<pre><code>当前主线在 QMSum profile 下使用固定的 candidate prefilter budget。
+这些参数属于系统超参数，用于控制 Q-K scoring 的计算量。
+跨数据集时需要重新 sweep，或者改成 latency-aware / data-adaptive budget。</code></pre>
+
+<p>未来更通用的方向可以是：</p>
+
+<pre><code>根据 topic 内 candidate 总数设比例；
+根据 lexical 分数分布自动截断；
+根据目标 latency budget 动态决定 pool size；
+根据 query 类型和历史召回情况自适应调整。</code></pre>
+
+<hr>
+
+<h3 id="sec-8-12">8.12 第八章和第九章的边界</h3>
+
+<p>第八章和第九章必须分清楚。</p>
+
+<table>
+  <tr>
+    <th>章节</th>
+    <th>核心问题</th>
+    <th>关键词</th>
+  </tr>
+  <tr>
+    <td>第八章</td>
+    <td>哪些 chunk 能进入 Q-K？Q-K 怎么执行得更快？</td>
+    <td>candidate pool, prefilter, dynamic budget, segment gate, batching, cache</td>
+  </tr>
+  <tr>
+    <td>第九章</td>
+    <td>进入 Q-K 的 chunk 到底怎么打分和排名？</td>
+    <td>Q, K, attention affinity, layer aggregation, head aggregation, chunk scalar</td>
+  </tr>
+</table>
+
+<p>一句话：</p>
+
+<pre><code>第八章控制候选和执行成本。
+第九章计算 Q-K 分数和最终排名。</code></pre>
+
+<hr>
+
+<h3 id="sec-8-13">8.13 给老师汇报的版本</h3>
+
+<p>可以这样讲：</p>
+
+<pre><code>粗路由选中 topic 后，我不会直接对 topic 内所有 chunk 做昂贵的 Q-K。
+
+我先用 lexical prefilter、query-type candidate budget 和 coarse segment gate 控制候选池，
+把 topic 内大量 chunk 压到几十个更可能相关的候选。
+
+然后我用 batched Q-K scoring、candidate-key cache 和 query-Q cache 优化执行。
+其中 query-Q cache 是 TTFT 大幅下降的关键，因为同一个 query 的 Q 只需要计算一次，
+后续所有 candidate batch 都可以复用。
+
+这些优化不改变 Q-K 打分公式，只减少进入 Q-K 的候选数量，并消除重复计算。
+因此它们主要降低 routing compute，从而降低 selected TTFT。</code></pre>
+
+<p>最后一条边界也要说清楚：</p>
+
+<pre><code>第八章是系统侧候选池控制和执行优化；
+第九章才是 Q-K attention fine routing 的具体打分原理。</code></pre>
+
+</body>
+</html>

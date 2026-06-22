@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>第 7 章：粗路由</title>
+<style>
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+  color: #1f2933;
+  line-height: 1.75;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 40px 28px 80px;
+  background: #ffffff;
+}
+h2 {
+  font-size: 24px;
+  margin: 0 0 24px;
+  border-bottom: 2px solid #d8dee9;
+  padding-bottom: 14px;
+}
+h3 {
+  font-size: 18px;
+  margin-top: 30px;
+  color: #243b53;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 6px;
+}
+p { margin: 12px 0; }
+code {
+  font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  background: #f3f4f6;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+pre {
+  background: #0f172a;
+  color: #e5e7eb;
+  padding: 14px 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.toc {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 24px 0 34px;
+}
+.toc h3 {
+  margin-top: 0;
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.toc ol { margin: 0; padding-left: 22px; }
+.toc li { margin: 4px 0; }
+hr {
+  border: 0;
+  border-top: 1px solid #e5e7eb;
+  margin: 28px 0;
+}
+a { color: #2563eb; text-decoration: none; }
+</style>
+</head>
+<body>
+<h2>第 7 章：粗路由</h2>
+
+<div class="toc">
+<h3>目录</h3>
+<ol>
+  <li><a href="#sec-7-0">7.0 这一章到底在讲什么</a></li>
+  <li><a href="#sec-7-1">7.1 粗路由到底做什么</a></li>
+  <li><a href="#sec-7-2">7.2 topic 怎么能被打分</a></li>
+  <li><a href="#sec-7-3">7.3 最重要公式：BM25</a></li>
+  <li><a href="#sec-7-4">7.4 用真实例子算一遍</a></li>
+  <li><a href="#sec-7-5">7.5 公式和代码怎么对应</a></li>
+  <li><a href="#sec-7-6">7.6 topic 和 node 在这里怎么处理</a></li>
+  <li><a href="#sec-7-7">7.7 为什么粗路由很关键</a></li>
+  <li><a href="#sec-7-8">7.8 本章核心记忆</a></li>
+</ol>
+</div>
+
+<h3 id="sec-7-0">7.0 这一章到底在讲什么</h3>
+
+<p>第 7 章讲的是粗路由，也就是：</p>
+
+<pre><code>query 来了以后，系统先选哪个 topic？</code></pre>
+
+<p>先把复杂东西拿掉：</p>
+
+<pre><code>第 7 章不是讲 node placement。
+第 7 章不是讲 Q-K fine routing。
+第 7 章只讲 query 怎么先选 topic。</code></pre>
+
+<p>准确链条是：</p>
+
+<pre><code>query
+-> 粗路由选 topic
+-> topic 再映射到 virtual node
+-> 后面在 selected topic 里做 Q-K chunk routing</code></pre>
+
+<p>所以第 7 章的核心输出是：</p>
+
+<pre><code>selected_topic_ids</code></pre>
+
+<p>不是直接输出真实 node。</p>
+
+<hr>
+
+<h3 id="sec-7-1">7.1 粗路由到底做什么</h3>
+
+<p>假设一场会议有 4 个 topic：</p>
+
+<pre><code>topic 0: Remote control prototype introduction
+topic 1: Product evaluation discussion
+topic 2: Product cost discussion
+topic 3: Project and overall process review</code></pre>
+
+<p>query 是：</p>
+
+<pre><code>What did the team discuss about the product cost?</code></pre>
+
+<p>粗路由要做的是：</p>
+
+<pre><code>给每个 topic 打一个分数，
+然后选分数最高的 topic。</code></pre>
+
+<p>输出可能是：</p>
+
+<pre><code>topic 2 score = 2.96
+topic 1 score = 1.08
+topic 0 score = 0
+topic 3 score = 0
+
+selected_topic_ids = [2]</code></pre>
+
+<p>然后后面才会：</p>
+
+<pre><code>只在 topic 2 里面切 chunk、做 Q-K。</code></pre>
+
+<p>所以粗路由的作用是先把搜索范围从整场会议缩小到少数 topic。</p>
+
+<hr>
+
+<h3 id="sec-7-2">7.2 topic 怎么能被打分</h3>
+
+<p>topic 本身不是一段纯文本，而是一个结构体：</p>
+
+<pre><code>{
+  "topic_id": 2,
+  "label": "Product cost discussion",
+  "turns": [284, 285, ..., 459]
+}</code></pre>
+
+<p>所以代码先把 topic 变成一段可匹配的文本，叫：</p>
+
+<pre><code>topic lexical document</code></pre>
+
+<p>它大概由两部分组成：</p>
+
+<pre><code>1. topic label
+2. representative turns</code></pre>
+
+<p>比如 topic 2 可以变成类似：</p>
+
+<pre><code>Product cost discussion
+
+Project Manager: Now we get to do the budget numbers ...
+...
+</code></pre>
+
+<p>query 也会被切成词：</p>
+
+<pre><code>What did the team discuss about the product cost?
+->
+what, did, team, discuss, product, cost</code></pre>
+
+<p>粗路由比较的是：</p>
+
+<pre><code>query tokens
+vs
+topic document tokens</code></pre>
+
+<p>这里的 representative turns 不是模型检索出来的，也不是 Q-K 算出来的。当前代码里是从 topic 覆盖的 turns 里均匀采样几个，用来给短短的 topic label 补一点上下文。</p>
+
+<hr>
+
+<h3 id="sec-7-3">7.3 最重要公式：BM25</h3>
+
+<p>当前粗路由的核心思想是 BM25。</p>
+
+<p>先看简化公式：</p>
+
+<pre><code>score(q, d) =
+sum over t in q:
+  IDF(t) * TF_part(t, d)</code></pre>
+
+<p>中文解释：</p>
+
+<pre><code>一个 query 和一个 topic document 的分数，
+等于 query 里每个词对这个 topic 的贡献加起来。</code></pre>
+
+<p>完整一点的公式是：</p>
+
+<pre><code>score(q, d) =
+Σ IDF(t) * [ tf(t,d) * (k1 + 1) ] /
+             [ tf(t,d) + k1 * (1 - b + b * |d| / avgdl) ]</code></pre>
+
+<p>逐个拆开：</p>
+
+<pre><code>q:
+  query。
+
+d:
+  某个 topic document。
+
+t:
+  query 里的某个词，比如 product 或 cost。
+
+tf(t,d):
+  词 t 在 topic document d 里出现了几次。
+
+|d|:
+  这个 topic document 的长度。
+
+avgdl:
+  所有 topic document 的平均长度。
+
+IDF(t):
+  这个词有多稀有，越稀有越重要。
+
+k1, b:
+  BM25 的固定调节参数。
+  代码里默认是 k1=1.2, b=0.75。</code></pre>
+
+<p>把公式说成人话：</p>
+
+<pre><code>如果 query 里的词出现在某个 topic 文档里，这个 topic 加分。
+如果这个词很少见，比如 cost 只出现在一个 topic 里，加分更多。
+如果一个 topic 文档特别长，BM25 会做长度惩罚，避免长文档天然占便宜。</code></pre>
+
+<hr>
+
+<h3 id="sec-7-4">7.4 用真实例子算一遍</h3>
+
+<p>query 是：</p>
+
+<pre><code>What did the team discuss about the product cost?</code></pre>
+
+<p>我们只看两个关键词：</p>
+
+<pre><code>product
+cost</code></pre>
+
+<p>4 个 topic label 是：</p>
+
+<pre><code>topic 0: Remote control prototype introduction
+topic 1: Product evaluation discussion
+topic 2: Product cost discussion
+topic 3: Project and overall process review</code></pre>
+
+<p>假设 <code>label_repeat=3</code>，所以 label 里的词会重复 3 次。</p>
+
+<p>那么：</p>
+
+<pre><code>topic 1 里：
+product 出现 3 次
+cost 出现 0 次
+
+topic 2 里：
+product 出现 3 次
+cost 出现 3 次</code></pre>
+
+<p>现在看 IDF。</p>
+
+<p><code>product</code> 出现在 topic 1 和 topic 2，两个 topic 都有，所以它不算特别稀有：</p>
+
+<pre><code>df(product) = 2</code></pre>
+
+<p><code>cost</code> 只出现在 topic 2，所以更稀有，更有区分度：</p>
+
+<pre><code>df(cost) = 1</code></pre>
+
+<p>BM25 的 IDF 大概是：</p>
+
+<pre><code>IDF(product) ≈ 0.69
+IDF(cost)    ≈ 1.20</code></pre>
+
+<p>所以 <code>cost</code> 比 <code>product</code> 更重要。</p>
+
+<p>再假设几个 topic 文档长度差不多，长度惩罚先近似不影响。tf=3 时，BM25 的 tf 部分大概是：</p>
+
+<pre><code>tf_part ≈ 1.57</code></pre>
+
+<p>topic 1 的分数：</p>
+
+<pre><code>topic 1:
+product 命中，cost 不命中
+
+score ≈ 0.69 * 1.57
+      ≈ 1.08</code></pre>
+
+<p>topic 2 的分数：</p>
+
+<pre><code>topic 2:
+product 命中，cost 命中
+
+score ≈ 0.69 * 1.57 + 1.20 * 1.57
+      ≈ 1.08 + 1.88
+      ≈ 2.96</code></pre>
+
+<p>所以：</p>
+
+<pre><code>topic 2 分数最高</code></pre>
+
+<p>粗路由选：</p>
+
+<pre><code>selected_topic_ids = [2]</code></pre>
+
+<p>这就符合直觉：</p>
+
+<pre><code>query 问 product cost，
+所以选 Product cost discussion。</code></pre>
+
+<hr>
+
+<h3 id="sec-7-5">7.5 公式和代码怎么对应</h3>
+
+<p>BM25 主体在代码里的函数是：</p>
+
+<pre><code>bm25_score_tokens(...)</code></pre>
+
+<p>核心代码是：</p>
+
+<pre><code>score += idf * ((tf * (k1 + 1.0)) / (tf + denom_base))</code></pre>
+
+<p>其中：</p>
+
+<pre><code>denom_base = k1 * (1.0 - b + b * (doc_len / avg_doc_len))</code></pre>
+
+<p>这对应公式里的：</p>
+
+<pre><code>k1 * (1 - b + b * |d| / avgdl)</code></pre>
+
+<p>粗路由调用链是：</p>
+
+<pre><code>score_topics_lexical_qmsum(...)
+-> bm25_score_tokens(...)
+-> rank_scores(...)
+-> selected_topic_ids = lexical_ranked_topics[:k_topics]</code></pre>
+
+<p>当前默认：</p>
+
+<pre><code>hier_top_topics = 1</code></pre>
+
+<p>所以只取最高分 topic。</p>
+
+<hr>
+
+<h3 id="sec-7-6">7.6 topic 和 node 在这里怎么处理</h3>
+
+<p>这里是你指出的重点。</p>
+
+<p>一个 virtual node 可以有多个 topics，所以第 7 章不能说“粗路由直接选 node”。</p>
+
+<p>准确说法是：</p>
+
+<pre><code>粗路由选 topic。
+topic 再映射到 virtual node。</code></pre>
+
+<p>比如：</p>
+
+<pre><code>virtual node 0:
+  topic 0
+  topic 1
+
+virtual node 1:
+  topic 2
+  topic 3</code></pre>
+
+<p>如果粗路由选中：</p>
+
+<pre><code>selected_topic_ids = [2]</code></pre>
+
+<p>那么系统知道：</p>
+
+<pre><code>topic 2 在 virtual node 1 上</code></pre>
+
+<p>所以：</p>
+
+<pre><code>selected_virtual_node_ids = [1]</code></pre>
+
+<p>但是，访问 node 1 不等于传 node 1 上所有 topic 的全部 KV。</p>
+
+<p>当前逻辑仍然是：</p>
+
+<pre><code>只在 selected topic 2 里面做 chunk Q-K；
+最后统计这些 selected chunks 涉及哪个 node。</code></pre>
+
+<p>因此：</p>
+
+<pre><code>topic selection = 语义选择
+node accounting = 系统成本统计</code></pre>
+
+<p>它们有关，但不是同一个动作。</p>
+
+<p>为什么不直接一个 topic 一个 node？因为一个 topic 一个 node 只是最简单特例。当前代码允许一个 node 放多个 topic，是为了模拟更真实的分布式存储：</p>
+
+<pre><code>语义 topic 数量可能很多；
+真实 KV nodes 数量有限；
+所以一个 node 可能承载多个 topic。</code></pre>
+
+<p>这样可以区分两个问题：</p>
+
+<pre><code>query 应该看什么内容？
+  -> topic selection
+
+这些内容放在哪些节点上？
+  -> node placement / node accounting</code></pre>
+
+<hr>
+
+<h3 id="sec-7-7">7.7 为什么粗路由很关键</h3>
+
+<p>粗路由决定后面的 Q-K 能在哪些 topic 里找。</p>
+
+<p>如果 query 是：</p>
+
+<pre><code>What did the team discuss about the product cost?</code></pre>
+
+<p>粗路由正确选中：</p>
+
+<pre><code>topic 2</code></pre>
+
+<p>那 Q-K 后面还有机会找到正确 chunks。</p>
+
+<p>但如果粗路由错误选成：</p>
+
+<pre><code>topic 0</code></pre>
+
+<p>那后面 Q-K 再强也很难救，因为正确证据根本不在候选集合里。</p>
+
+<p>所以第 7 章最关键的一句话是：</p>
+
+<pre><code>粗路由决定了 Q-K fine routing 的搜索范围。</code></pre>
+
+<hr>
+
+<h3 id="sec-7-8">7.8 本章核心记忆</h3>
+
+<p>第 7 章主链条是：</p>
+
+<pre><code>query text
+-> query tokens
+-> 每个 topic 变成 topic lexical document
+-> BM25 计算 query 和每个 topic 的 lexical score
+-> topic 排序
+-> 选 top-1 topic
+-> 只保留这个 topic 内的 chunk candidates
+-> 后面进入 Q-K fine routing</code></pre>
+
+<p>BM25 的核心公式是：</p>
+
+<pre><code>score(q, d) =
+Σ IDF(t) * [ tf(t,d) * (k1 + 1) ] /
+             [ tf(t,d) + k1 * (1 - b + b * |d| / avgdl) ]</code></pre>
+
+<p>它的直觉是：</p>
+
+<pre><code>query 关键词在 topic 文档里出现越多，topic 越相关；
+关键词越稀有，越有区分度；
+topic 文档太长不能无脑占便宜。</code></pre>
+
+<p>topic 和 node 的准确关系是：</p>
+
+<pre><code>粗路由选 topic，不是直接选 node。
+一个 virtual node 可以放多个 topics。
+selected topic 会映射到 selected virtual node，用于后面的传输成本统计。</code></pre>
+
+<p>一句话总结：</p>
+
+<pre><code>粗路由是用轻量 lexical/BM25 先选 topic，
+把 Q-K fine routing 的搜索范围缩小到 selected topic 内。</code></pre>
+
+</body>
+</html>

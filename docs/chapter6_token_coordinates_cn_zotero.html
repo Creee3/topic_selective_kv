@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>第 6 章：数据到 token 坐标</title>
+<style>
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+  color: #1f2933;
+  line-height: 1.75;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 40px 28px 80px;
+  background: #ffffff;
+}
+h2 {
+  font-size: 24px;
+  margin: 0 0 24px;
+  border-bottom: 2px solid #d8dee9;
+  padding-bottom: 14px;
+}
+h3 {
+  font-size: 18px;
+  margin-top: 30px;
+  color: #243b53;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 6px;
+}
+p { margin: 12px 0; }
+code {
+  font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  background: #f3f4f6;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+pre {
+  background: #0f172a;
+  color: #e5e7eb;
+  padding: 14px 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.toc {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 24px 0 34px;
+}
+.toc h3 {
+  margin-top: 0;
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.toc ol { margin: 0; padding-left: 22px; }
+.toc li { margin: 4px 0; }
+hr {
+  border: 0;
+  border-top: 1px solid #e5e7eb;
+  margin: 28px 0;
+}
+a { color: #2563eb; text-decoration: none; }
+</style>
+</head>
+<body>
+<h2>第 6 章：数据到 token 坐标</h2>
+
+<div class="toc">
+<h3>目录</h3>
+<ol>
+  <li><a href="#sec-6-0">6.0 这一章到底在讲什么</a></li>
+  <li><a href="#sec-6-1">6.1 为什么需要 token 坐标</a></li>
+  <li><a href="#sec-6-2">6.2 turn_boundaries 为什么是地基</a></li>
+  <li><a href="#sec-6-3">6.3 build_qmsum_prompt 在做什么</a></li>
+  <li><a href="#sec-6-4">6.4 tokenizer 怎么把字符坐标变成 token 坐标</a></li>
+  <li><a href="#sec-6-5">6.5 为什么 add_special_tokens=False 很重要</a></li>
+  <li><a href="#sec-6-6">6.6 一个完整小例子</a></li>
+  <li><a href="#sec-6-7">6.7 和真实工程代码怎么对应</a></li>
+  <li><a href="#sec-6-8">6.8 本章核心记忆</a></li>
+</ol>
+</div>
+
+<h3 id="sec-6-0">6.0 这一章到底在讲什么</h3>
+
+<p>第 5 章讲了 QMSum 数据结构。你已经知道 QMSum 给的是：</p>
+
+<pre><code>turn 0
+turn 1
+turn 2
+...</code></pre>
+
+<p>但是模型的 KV cache 不是按 turn 存的，它是按 token 位置存的。</p>
+
+<p>所以第 6 章要解决的问题是：</p>
+
+<pre><code>QMSum 说答案证据在 turn 54-61，
+但 KV cache 只知道 token 位置 1234-1678。
+那系统怎么知道 turn 54 对应哪些 tokens？</code></pre>
+
+<p>答案就是：</p>
+
+<pre><code>turn_boundaries</code></pre>
+
+<p>它是 QMSum 的 turn 世界和 LLM 的 token/KV 世界之间的翻译表。</p>
+
+<hr>
+
+<h3 id="sec-6-1">6.1 为什么需要 token 坐标</h3>
+
+<p>QMSum 原始数据的坐标是 turn 坐标。</p>
+
+<p>比如一个 query 的证据标注是：</p>
+
+<pre><code>relevant_text_span = [[54, 61]]</code></pre>
+
+<p>意思是：</p>
+
+<pre><code>答案证据在 turn 54 到 turn 61。</code></pre>
+
+<p>但模型 prefill 后的 KV cache 是按 token 存的：</p>
+
+<pre><code>token 0 的 K/V
+token 1 的 K/V
+token 2 的 K/V
+...
+token N 的 K/V</code></pre>
+
+<p>KV cache 不知道什么叫 turn 54。它只知道：</p>
+
+<pre><code>第几个 token</code></pre>
+
+<p>所以工程必须建立一张桥表：</p>
+
+<pre><code>turn_idx -> token_start, token_end</code></pre>
+
+<p>这张表就是：</p>
+
+<pre><code>turn_boundaries</code></pre>
+
+<p>比如它可能长这样：</p>
+
+<pre><code>turn_boundaries[0]  = (0, 310)
+turn_boundaries[1]  = (310, 318)
+turn_boundaries[54] = (5200, 5348)
+turn_boundaries[61] = (6100, 6180)</code></pre>
+
+<p>意思是：</p>
+
+<pre><code>turn 54 对应 prompt 里的 token [5200, 5348)
+turn 61 对应 prompt 里的 token [6100, 6180)</code></pre>
+
+<p>注意这里是半开区间：</p>
+
+<pre><code>[start, end)</code></pre>
+
+<p>包含 start，不包含 end。</p>
+
+<hr>
+
+<h3 id="sec-6-2">6.2 turn_boundaries 为什么是地基</h3>
+
+<p>后面很多东西都依赖 <code>turn_boundaries</code>。</p>
+
+<p>第一，切 chunk 要靠它。</p>
+
+<p>比如代码知道：</p>
+
+<pre><code>turn 54 = token [5200, 5348)</code></pre>
+
+<p>如果：</p>
+
+<pre><code>route_chunk_size = 128</code></pre>
+
+<p>那么可以切出：</p>
+
+<pre><code>chunk A = [5200, 5328)
+chunk B = [5328, 5348)</code></pre>
+
+<p>第二，Q-K 打分要靠它。</p>
+
+<p>因为 Q-K fine routing 不是对原始字符串打分，而是对历史 chunk 的 K 打分。</p>
+
+<p>要拿某个 chunk 的 K，就必须知道：</p>
+
+<pre><code>这个 chunk 在 KV cache 里的 token start/end 是多少。</code></pre>
+
+<p>第三，评价指标也要靠它。</p>
+
+<p>Q-K 选出来的是 chunk：</p>
+
+<pre><code>selected chunk = token [5200, 5328)</code></pre>
+
+<p>但 QMSum gold evidence 是 turn：</p>
+
+<pre><code>gold turns = 54-61</code></pre>
+
+<p>所以要把 selected chunk 映射回 turn，才能算：</p>
+
+<pre><code>selected_turn recall
+selected_turn precision
+selected_turn F1</code></pre>
+
+<p>一句话：</p>
+
+<pre><code>turn_boundaries 是 QMSum turn 世界和 LLM token/KV 世界之间的翻译表。</code></pre>
+
+<hr>
+
+<h3 id="sec-6-3">6.3 build_qmsum_prompt 在做什么</h3>
+
+<p>核心代码在 <code>qmsum_data.py</code> 的 <code>build_qmsum_prompt(...)</code>。</p>
+
+<p>它先把每个 turn 拼成文本：</p>
+
+<pre><code>speaker = turn.get("speaker", "").strip() or "Speaker"
+content = turn.get("content", "").strip()
+turn_text = f"{speaker}: {content}\n\n"</code></pre>
+
+<p>比如：</p>
+
+<pre><code>Project Manager: Yep . Soon as I get this ...
+
+User Interface: The prototype discussion .
+
+Industrial Designer: I'd say a bit smaller would probably be nice .</code></pre>
+
+<p>然后把所有 turn 拼成一个大 prompt：</p>
+
+<pre><code>prompt_text = turn0_text + turn1_text + turn2_text + ...</code></pre>
+
+<p>这个 <code>prompt_text</code> 就是模型做 prefill 的长上下文。</p>
+
+<p>同时，代码会记录每个 turn 在字符串里的字符范围：</p>
+
+<pre><code>turn_char_spans.append((char_offset, char_offset + len(turn_text)))</code></pre>
+
+<p>比如简化例子：</p>
+
+<pre><code>turn 0 chars: [0, 80)
+turn 1 chars: [80, 130)
+turn 2 chars: [130, 220)</code></pre>
+
+<p>这一步还是字符坐标，不是 token 坐标。</p>
+
+<hr>
+
+<h3 id="sec-6-4">6.4 tokenizer 怎么把字符坐标变成 token 坐标</h3>
+
+<p>接下来代码调用 tokenizer：</p>
+
+<pre><code>encoded = tokenizer(
+    prompt_text,
+    add_special_tokens=False,
+    return_offsets_mapping=True,
+)</code></pre>
+
+<p>这里关键是：</p>
+
+<pre><code>return_offsets_mapping=True</code></pre>
+
+<p>它让 tokenizer 返回一张表：</p>
+
+<pre><code>token_idx -> 这个 token 对应 prompt_text 里的字符范围</code></pre>
+
+<p>比如玩具例子：</p>
+
+<pre><code>prompt_text = "A: hello world\n\nB: good morning"</code></pre>
+
+<p>tokenizer 可能给出：</p>
+
+<pre><code>token 0 -> chars [0, 1)    "A"
+token 1 -> chars [1, 2)    ":"
+token 2 -> chars [3, 8)    "hello"
+token 3 -> chars [9, 14)   "world"
+token 4 -> chars [16, 17)  "B"
+token 5 -> chars [17, 18)  ":"
+token 6 -> chars [19, 23)  "good"
+token 7 -> chars [24, 31)  "morning"</code></pre>
+
+<p>如果 turn 0 的字符范围是：</p>
+
+<pre><code>turn 0 chars [0, 15)</code></pre>
+
+<p>那它覆盖 token：</p>
+
+<pre><code>token 0, 1, 2, 3</code></pre>
+
+<p>所以：</p>
+
+<pre><code>turn_boundaries[0] = (0, 4)</code></pre>
+
+<p>如果 turn 1 的字符范围是：</p>
+
+<pre><code>turn 1 chars [16, 31)</code></pre>
+
+<p>那它覆盖 token：</p>
+
+<pre><code>token 4, 5, 6, 7</code></pre>
+
+<p>所以：</p>
+
+<pre><code>turn_boundaries[1] = (4, 8)</code></pre>
+
+<p>这就是“从字符坐标到 token 坐标”的核心。</p>
+
+<hr>
+
+<h3 id="sec-6-5">6.5 为什么 add_special_tokens=False 很重要</h3>
+
+<p>这个参数非常重要。</p>
+
+<p>工程必须让两件事的 token 坐标一致：</p>
+
+<pre><code>1. build_qmsum_prompt 里算出来的 turn_boundaries
+2. qmsum_mainline.py 里真正 prefill 的 input_ids</code></pre>
+
+<p>所以算 <code>turn_boundaries</code> 时使用：</p>
+
+<pre><code>add_special_tokens=False</code></pre>
+
+<p>真正 prefill 时也使用：</p>
+
+<pre><code>inputs = tokenizer(
+    prompt_text,
+    return_tensors="pt",
+    add_special_tokens=False,
+)</code></pre>
+
+<p>如果一边加 special tokens，另一边不加，就会错位。</p>
+
+<p>比如 tokenizer 自动在开头加了一个 BOS token：</p>
+
+<pre><code>token 0 = &lt;s&gt;
+token 1 = 原来的第一个文本 token
+token 2 = 原来的第二个文本 token
+...</code></pre>
+
+<p>那所有 turn boundary 都会整体偏 1。</p>
+
+<p>这对 KV cache 是致命的，因为你以为自己拿的是 turn 54 的 K/V，实际可能偏到别的文本。</p>
+
+<p>核心原则是：</p>
+
+<pre><code>算 turn_boundaries 用什么 tokenization，
+prefill KV cache 也必须用同一套 tokenization。</code></pre>
+
+<hr>
+
+<h3 id="sec-6-6">6.6 一个完整小例子</h3>
+
+<p>假设有三个 turn：</p>
+
+<pre><code>turn 0:
+Project Manager: Welcome everyone.
+
+turn 1:
+Designer: The remote should be yellow.
+
+turn 2:
+Marketing: Users want simple controls.</code></pre>
+
+<p>拼成 prompt：</p>
+
+<pre><code>Project Manager: Welcome everyone.
+
+Designer: The remote should be yellow.
+
+Marketing: Users want simple controls.</code></pre>
+
+<p>假设 tokenizer 后得到：</p>
+
+<pre><code>turn 0 -> tokens [0, 6)
+turn 1 -> tokens [6, 14)
+turn 2 -> tokens [14, 21)</code></pre>
+
+<p>那么：</p>
+
+<pre><code>turn_boundaries = [
+  (0, 6),
+  (6, 14),
+  (14, 21),
+]</code></pre>
+
+<p>如果 QMSum 给了一个 query：</p>
+
+<pre><code>{
+  "query": "What colour should the remote be?",
+  "relevant_text_span": [[1, 1]]
+}</code></pre>
+
+<p>它表示：</p>
+
+<pre><code>答案证据在 turn 1。</code></pre>
+
+<p>工程就能通过：</p>
+
+<pre><code>turn_boundaries[1]</code></pre>
+
+<p>知道：</p>
+
+<pre><code>turn 1 对应 token [6, 14)</code></pre>
+
+<p>后面切 chunk、取 KV、评估 selected turns 都靠这个。</p>
+
+<hr>
+
+<h3 id="sec-6-7">6.7 和真实工程代码怎么对应</h3>
+
+<p>第六章主要对应两个位置。</p>
+
+<p>第一处在 <code>qmsum_data.py</code>：</p>
+
+<pre><code>prompt_text, turn_boundaries = build_qmsum_prompt(transcripts, tokenizer)</code></pre>
+
+<p>这里生成：</p>
+
+<pre><code>prompt_text:
+  整场 meeting 拼起来的长文本。
+
+turn_boundaries:
+  每个 turn 对应的 token 范围。</code></pre>
+
+<p>第二处在 <code>qmsum_mainline.py</code>：</p>
+
+<pre><code>inputs = tokenizer(
+    prompt_text,
+    return_tensors="pt",
+    add_special_tokens=False,
+)
+input_ids = inputs.input_ids.cuda()</code></pre>
+
+<p>这里用同一个 <code>prompt_text</code> 做 prefill，拿到全量 KV cache。</p>
+
+<p>后续切 chunk 时，会用 <code>turn_boundaries</code>：</p>
+
+<pre><code>turn_idx -> start_t, end_t
+然后按 route_chunk_size 切成 chunk candidates。</code></pre>
+
+<p>所以这条链是：</p>
+
+<pre><code>meeting_transcripts
+-> prompt_text
+-> tokenizer offset_mapping
+-> turn_boundaries
+-> chunk token ranges
+-> KV cache slice
+-> Q-K scoring
+-> selected turns evaluation</code></pre>
+
+<hr>
+
+<h3 id="sec-6-8">6.8 本章核心记忆</h3>
+
+<p>第六章最核心的是：</p>
+
+<pre><code>QMSum 的证据标注是 turn 坐标；
+LLM 的 KV cache 是 token 坐标；
+turn_boundaries 把 turn 坐标翻译成 token 坐标。</code></pre>
+
+<p>如果没有这张表，工程就不知道：</p>
+
+<pre><code>哪个 turn 对应 KV cache 里的哪一段；
+哪个 chunk 来自哪个 turn；
+selected chunk 有没有覆盖 gold evidence turn。</code></pre>
+
+<p>所以：</p>
+
+<pre><code>turn_boundaries 是全工程的地基。</code></pre>
+
+</body>
+</html>

@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>BM25 公式渲染版</title>
+<style>
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+  color: #111827;
+  background: #ffffff;
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 44px 32px 80px;
+  line-height: 1.72;
+}
+h2 {
+  font-size: 28px;
+  margin: 0 0 28px;
+  border-bottom: 2px solid #d8dee9;
+  padding-bottom: 14px;
+}
+h3 {
+  font-size: 20px;
+  margin-top: 34px;
+  color: #243b53;
+}
+.formula-card {
+  border: 1px solid #d8dee9;
+  border-radius: 8px;
+  padding: 22px 24px;
+  margin: 18px 0 28px;
+  background: #f8fafc;
+}
+.formula-title {
+  font-weight: 700;
+  margin-bottom: 12px;
+  color: #334155;
+}
+math {
+  font-size: 1.35rem;
+}
+.big math {
+  font-size: 1.55rem;
+}
+.note {
+  background: #fff7ed;
+  border-left: 4px solid #f97316;
+  padding: 12px 16px;
+  margin: 18px 0;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 18px 0 28px;
+}
+th, td {
+  border: 1px solid #e5e7eb;
+  padding: 10px 12px;
+  vertical-align: top;
+}
+th {
+  background: #f1f5f9;
+  text-align: left;
+}
+code {
+  font-family: "Cascadia Code", Consolas, monospace;
+  background: #f3f4f6;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+pre {
+  background: #0f172a;
+  color: #e5e7eb;
+  padding: 14px 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+</style>
+</head>
+<body>
+<h2>BM25 公式渲染版</h2>
+
+<h3>1. 总公式</h3>
+<div class="formula-card big">
+  <div class="formula-title">query q 和 topic document d 的 BM25 分数</div>
+  <math display="block">
+    <mrow>
+      <mi>score</mi>
+      <mo stretchy="false">(</mo>
+      <mi>q</mi>
+      <mo>,</mo>
+      <mi>d</mi>
+      <mo stretchy="false">)</mo>
+      <mo>=</mo>
+      <munder>
+        <mo>&#x2211;</mo>
+        <mrow>
+          <mi>t</mi>
+          <mo>&#x2208;</mo>
+          <mi>q</mi>
+        </mrow>
+      </munder>
+      <mi>IDF</mi>
+      <mo stretchy="false">(</mo>
+      <mi>t</mi>
+      <mo stretchy="false">)</mo>
+      <mo>&#x22C5;</mo>
+      <mfrac>
+        <mrow>
+          <mi>tf</mi>
+          <mo stretchy="false">(</mo>
+          <mi>t</mi>
+          <mo>,</mo>
+          <mi>d</mi>
+          <mo stretchy="false">)</mo>
+          <mo>&#x22C5;</mo>
+          <mo stretchy="false">(</mo>
+          <msub><mi>k</mi><mn>1</mn></msub>
+          <mo>+</mo>
+          <mn>1</mn>
+          <mo stretchy="false">)</mo>
+        </mrow>
+        <mrow>
+          <mi>tf</mi>
+          <mo stretchy="false">(</mo>
+          <mi>t</mi>
+          <mo>,</mo>
+          <mi>d</mi>
+          <mo stretchy="false">)</mo>
+          <mo>+</mo>
+          <msub><mi>k</mi><mn>1</mn></msub>
+          <mo>&#x22C5;</mo>
+          <mo stretchy="false">(</mo>
+          <mn>1</mn>
+          <mo>-</mo>
+          <mi>b</mi>
+          <mo>+</mo>
+          <mi>b</mi>
+          <mo>&#x22C5;</mo>
+          <mfrac>
+            <mrow><mo>|</mo><mi>d</mi><mo>|</mo></mrow>
+            <mi>avgdl</mi>
+          </mfrac>
+          <mo stretchy="false">)</mo>
+        </mrow>
+      </mfrac>
+    </mrow>
+  </math>
+</div>
+
+<h3>2. IDF 公式</h3>
+<div class="formula-card">
+  <div class="formula-title">词 t 的区分度</div>
+  <math display="block">
+    <mrow>
+      <mi>IDF</mi>
+      <mo stretchy="false">(</mo>
+      <mi>t</mi>
+      <mo stretchy="false">)</mo>
+      <mo>=</mo>
+      <mi>log</mi>
+      <mo stretchy="false">(</mo>
+      <mn>1</mn>
+      <mo>+</mo>
+      <mfrac>
+        <mrow>
+          <mi>N</mi>
+          <mo>-</mo>
+          <mi>df</mi>
+          <mo stretchy="false">(</mo>
+          <mi>t</mi>
+          <mo stretchy="false">)</mo>
+          <mo>+</mo>
+          <mn>0.5</mn>
+        </mrow>
+        <mrow>
+          <mi>df</mi>
+          <mo stretchy="false">(</mo>
+          <mi>t</mi>
+          <mo stretchy="false">)</mo>
+          <mo>+</mo>
+          <mn>0.5</mn>
+        </mrow>
+      </mfrac>
+      <mo stretchy="false">)</mo>
+    </mrow>
+  </math>
+</div>
+
+<h3>3. 长度惩罚项</h3>
+<div class="formula-card">
+  <div class="formula-title">代码里的 denom_base</div>
+  <math display="block">
+    <mrow>
+      <mi>denom_base</mi>
+      <mo>=</mo>
+      <msub><mi>k</mi><mn>1</mn></msub>
+      <mo>&#x22C5;</mo>
+      <mo stretchy="false">(</mo>
+      <mn>1</mn>
+      <mo>-</mo>
+      <mi>b</mi>
+      <mo>+</mo>
+      <mi>b</mi>
+      <mo>&#x22C5;</mo>
+      <mfrac>
+        <mrow><mo>|</mo><mi>d</mi><mo>|</mo></mrow>
+        <mi>avgdl</mi>
+      </mfrac>
+      <mo stretchy="false">)</mo>
+    </mrow>
+  </math>
+</div>
+
+<h3>4. 单个词的贡献</h3>
+<div class="formula-card">
+  <div class="formula-title">term_score</div>
+  <math display="block">
+    <mrow>
+      <mi>term_score</mi>
+      <mo stretchy="false">(</mo>
+      <mi>t</mi>
+      <mo>,</mo>
+      <mi>d</mi>
+      <mo stretchy="false">)</mo>
+      <mo>=</mo>
+      <mi>IDF</mi>
+      <mo stretchy="false">(</mo>
+      <mi>t</mi>
+      <mo stretchy="false">)</mo>
+      <mo>&#x22C5;</mo>
+      <mfrac>
+        <mrow>
+          <mi>tf</mi>
+          <mo stretchy="false">(</mo>
+          <mi>t</mi>
+          <mo>,</mo>
+          <mi>d</mi>
+          <mo stretchy="false">)</mo>
+          <mo>&#x22C5;</mo>
+          <mo stretchy="false">(</mo>
+          <msub><mi>k</mi><mn>1</mn></msub>
+          <mo>+</mo>
+          <mn>1</mn>
+          <mo stretchy="false">)</mo>
+        </mrow>
+        <mrow>
+          <mi>tf</mi>
+          <mo stretchy="false">(</mo>
+          <mi>t</mi>
+          <mo>,</mo>
+          <mi>d</mi>
+          <mo stretchy="false">)</mo>
+          <mo>+</mo>
+          <mi>denom_base</mi>
+        </mrow>
+      </mfrac>
+    </mrow>
+  </math>
+</div>
+
+<h3>5. 你的工程里的含义</h3>
+<table>
+  <tr>
+    <th>公式符号</th>
+    <th>在你的工程里是什么意思</th>
+  </tr>
+  <tr>
+    <td><code>q</code></td>
+    <td>当前 specific query，例如 “What did the team discuss about the product cost?”</td>
+  </tr>
+  <tr>
+    <td><code>d</code></td>
+    <td>某个 topic lexical document，例如 topic 2 的 “Product cost discussion + representative turns”</td>
+  </tr>
+  <tr>
+    <td><code>t</code></td>
+    <td>query 里的词，例如 <code>product</code> 或 <code>cost</code></td>
+  </tr>
+  <tr>
+    <td><code>tf(t,d)</code></td>
+    <td>词 t 在 topic document d 里出现的次数</td>
+  </tr>
+  <tr>
+    <td><code>df(t)</code></td>
+    <td>有多少个 topic document 出现过词 t</td>
+  </tr>
+  <tr>
+    <td><code>N</code></td>
+    <td>当前 meeting 里的 topic document 总数</td>
+  </tr>
+  <tr>
+    <td><code>|d| / avgdl</code></td>
+    <td>当前 topic document 相对平均 topic document 的长度比例，用来做长度惩罚</td>
+  </tr>
+</table>
+
+<div class="note">
+  <p><strong>为什么例子里 tf = 3？</strong></p>
+  <p>因为假设 <code>label_repeat = 3</code>。例如 topic 2 的 label 是 <code>Product cost discussion</code>，重复 3 次后，<code>product</code> 和 <code>cost</code> 都出现 3 次，所以 <code>tf(product, topic2)=3</code>，<code>tf(cost, topic2)=3</code>。</p>
+</div>
+
+<h3>6. 一句话</h3>
+<pre><code>BM25 粗路由做的事情：
+看 query 里的关键词在每个 topic document 里出现得多不多，
+再给稀有关键词更高权重，
+同时惩罚过长 topic document，
+最后选分数最高的 topic。</code></pre>
+
+</body>
+</html>

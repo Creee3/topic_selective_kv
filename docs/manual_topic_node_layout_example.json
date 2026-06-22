@@ -1,0 +1,10 @@
+{
+  "description": "Example only. Topic ids are QMSum/manual semantic topic ids; node ids are deployable or virtual KV nodes.",
+  "topic_to_node": {
+    "0": 0,
+    "1": 0,
+    "2": 1,
+    "3": 2,
+    "4": 3
+  }
+}

@@ -1,0 +1,45 @@
+# Runtime caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local environments
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Experiment artifacts
+logs/
+outputs/
+results/
+results.tar.gz
+outputs.tar.gz
+*.log
+
+# Datasets and large local bundles
+data/
+data.tar.gz
+*.tar
+*.tar.gz
+*.zip
+*.7z
+*.gz
+
+# Model/cache artifacts
+models/
+checkpoints/
+*.pt
+*.pth
+*.safetensors
+*.bin
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

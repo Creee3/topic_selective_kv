@@ -1,0 +1,870 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>第 11 章：当前主线最优实验记录</title>
+<style>
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+  color: #1f2933;
+  line-height: 1.78;
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 40px 28px 84px;
+  background: #ffffff;
+}
+h2 {
+  font-size: 25px;
+  margin: 0 0 24px;
+  border-bottom: 2px solid #d8dee9;
+  padding-bottom: 14px;
+}
+h3 {
+  font-size: 18px;
+  margin-top: 32px;
+  color: #243b53;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 6px;
+}
+p { margin: 12px 0; }
+code {
+  font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  background: #f3f4f6;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+pre {
+  background: #0f172a;
+  color: #e5e7eb;
+  padding: 14px 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.toc {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 24px 0 34px;
+}
+.toc h3 {
+  margin-top: 0;
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.toc ol { margin: 0; padding-left: 22px; }
+.toc li { margin: 4px 0; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0 22px;
+  font-size: 14px;
+}
+th, td {
+  border: 1px solid #d8dee9;
+  padding: 8px 10px;
+  vertical-align: top;
+}
+th {
+  background: #f1f5f9;
+  text-align: left;
+}
+.note {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 16px 0;
+}
+.key {
+  background: #ecfdf5;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 16px 0;
+}
+.warn {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 16px 0;
+}
+hr {
+  border: 0;
+  border-top: 1px solid #e5e7eb;
+  margin: 30px 0;
+}
+a { color: #2563eb; text-decoration: none; }
+</style>
+</head>
+<body>
+<h2>第 11 章：当前主线最优实验记录</h2>
+
+<div class="toc">
+<h3>目录</h3>
+<ol>
+  <li><a href="#sec-11-0">11.0 本章一句话</a></li>
+  <li><a href="#sec-11-1">11.1 这次实验是哪一次</a></li>
+  <li><a href="#sec-11-2">11.2 当前主线到底跑了什么</a></li>
+  <li><a href="#sec-11-3">11.3 关键配置</a></li>
+  <li><a href="#sec-11-4">11.4 为什么是 99 个 case</a></li>
+  <li><a href="#sec-11-5">11.5 全局平均结果</a></li>
+  <li><a href="#sec-11-6">11.6 四个 split 的结果</a></li>
+  <li><a href="#sec-11-7">11.7 怎么理解“当前主线最优”</a></li>
+  <li><a href="#sec-11-8">11.8 这次结果证明了什么</a></li>
+  <li><a href="#sec-11-9">11.9 这次结果还不能证明什么</a></li>
+  <li><a href="#sec-11-10">11.10 给老师汇报的版本</a></li>
+  <li><a href="#sec-11-11">11.11 本地证据文件</a></li>
+</ol>
+</div>
+
+<h3 id="sec-11-0">11.0 本章一句话</h3>
+
+<div class="key">
+  <p>当前可以记录为主线最优的一次完整实验是：<strong>QMSum train docs 0-20，每个 doc 最多 5 个 specific query，current mainline profile，4 个 virtual nodes，启用 query-Q cache 和 batched Q-K scoring</strong>。</p>
+</div>
+
+<p>这次实验的核心结果是：</p>
+
+<pre><code>有效 case 数: 99
+selected KV: 50.89 MiB
+full KV: 1662.03 MiB
+KV saving: 96.53%
+
+selected TTFT: 97.16 ms
+full TTFT: 577.24 ms
+TTFT saving: 80.83%
+
+full-answer F1: 18.89%
+selected-answer F1: 17.14%
+answer F1 delta: -1.75%</code></pre>
+
+<p>换成人话就是：当前主线用很小的证据/KV 子集，保住了大部分回答质量，同时把 estimated TTFT 从约 <code>577 ms</code> 降到约 <code>97 ms</code>。</p>
+
+<hr>
+
+<h3 id="sec-11-1">11.1 这次实验是哪一次</h3>
+
+<p>本地对应的日志目录是：</p>
+
+<pre><code>topic_selective_kv/logs/qmsum_survival_split_0_20_q5</code></pre>
+
+<p>对应的输出文件是四个 split：</p>
+
+<pre><code>outputs/qmsum_case_summary_N4_0_5_current_mainline_0_5_q5.tsv
+outputs/qmsum_case_summary_N4_5_10_current_mainline_5_10_q5.tsv
+outputs/qmsum_case_summary_N4_10_15_current_mainline_10_15_q5.tsv
+outputs/qmsum_case_summary_N4_15_20_current_mainline_15_20_q5.tsv</code></pre>
+
+<p>这四个 TSV 合起来就是 docs 0-20 的当前主线结果。</p>
+
+<p>可复现实验命令可以写成：</p>
+
+<pre><code>cd ~/working_place/topic_selective_kv
+
+START_DOC=0 END_DOC=20 DOCS_PER_JOB=5 MAX_QUERIES=5 \
+GPUS="4 5 6 7" NUM_NODES=4 EVAL_ANSWERS=1 \
+LOG_ROOT=logs/qmsum_survival_split_0_20_q5 \
+bash scripts_qmsum/run_qmsum_current_mainline_4gpu_split.sh</code></pre>
+
+<div class="note">
+  <p>这里的 <code>GPUS="4 5 6 7"</code> 是根据日志目录名 <code>docs_0_5_gpu4</code>、<code>docs_5_10_gpu5</code>、<code>docs_10_15_gpu6</code>、<code>docs_15_20_gpu7</code> 复原出来的运行形态。真正重要的不是 GPU 编号，而是这次跑的是 <code>current mainline</code>、<code>docs 0-20</code>、<code>max_queries=5</code>。</p>
+</div>
+
+<hr>
+
+<h3 id="sec-11-2">11.2 当前主线到底跑了什么</h3>
+
+<p>当前主线不是一个单独的 Q-K 打分函数，而是一整条 selective KV fetch 流程。</p>
+
+<pre><code>QMSum topic labels
+-> 构造成 topic/node
+-> lexical/BM25 粗路由选 top-1 topic
+-> 在这个 topic 里生成 candidate chunks
+-> lexical prefilter 先压候选池
+-> dynamic candidate pool 继续按 query 类型控预算
+-> coarse segment gate 尽量保留更集中的候选段
+-> batched exact Q-K 给候选 chunks 精排
+-> 选出 selected chunks
+-> 按 virtual node 做 transfer accounting
+-> 估算 selected KV fetch latency 和 TTFT
+-> 可选：用 selected context 生成答案并算 answer F1</code></pre>
+
+<p>这条主线在代码里对应：</p>
+
+<pre><code>scripts_qmsum/run_qmsum_current_mainline.sh
+  -> qmsum_mainline.py
+  -> qmsum_mainline_config.py 的 mainline_profile = current
+  -> qmsum_mainline_routing.py 做路由和 Q-K
+  -> qmsum_eval.py 做指标和 TTFT 估算
+  -> qmsum_answering.py 做回答质量评测</code></pre>
+
+<hr>
+
+<h3 id="sec-11-3">11.3 关键配置</h3>
+
+<p>这次实验使用的是 <code>mainline_profile=current</code>。关键配置可以整理成下面这张表。</p>
+
+<table>
+  <tr>
+    <th>配置</th>
+    <th>值</th>
+    <th>含义</th>
+  </tr>
+  <tr>
+    <td><code>data_path</code></td>
+    <td><code>data/qmsum_structured/train.jsonl</code></td>
+    <td>使用 QMSum structured train split</td>
+  </tr>
+  <tr>
+    <td><code>START_DOC / END_DOC</code></td>
+    <td><code>0 / 20</code></td>
+    <td>跑 train 里的前 20 个 meeting</td>
+  </tr>
+  <tr>
+    <td><code>MAX_QUERIES</code></td>
+    <td><code>5</code></td>
+    <td>每个 meeting 最多跑 5 个 specific query</td>
+  </tr>
+  <tr>
+    <td><code>NUM_NODES</code></td>
+    <td><code>4</code></td>
+    <td>用 4 个 virtual nodes 模拟分布式 KV 节点</td>
+  </tr>
+  <tr>
+    <td><code>hier_top_strategy</code></td>
+    <td><code>lexical</code></td>
+    <td>粗路由用 lexical/BM25 选 topic</td>
+  </tr>
+  <tr>
+    <td><code>hier_top_topics</code></td>
+    <td><code>1</code></td>
+    <td>只进入最相关的 1 个 topic</td>
+  </tr>
+  <tr>
+    <td><code>route_chunk_size</code></td>
+    <td><code>128</code></td>
+    <td>候选 chunk 的目标 token 粒度</td>
+  </tr>
+  <tr>
+    <td><code>route_top_k</code></td>
+    <td><code>12</code></td>
+    <td>基础 chunk 选择预算；因为 <code>route_per_head=True</code>，最终 chunk 数可能超过 12</td>
+  </tr>
+  <tr>
+    <td><code>route_per_head</code></td>
+    <td><code>True</code></td>
+    <td>每个 attention head 各自选 top chunks，再取并集</td>
+  </tr>
+  <tr>
+    <td><code>route_neighbor_expand</code></td>
+    <td><code>0</code></td>
+    <td>不额外扩展相邻 chunk</td>
+  </tr>
+  <tr>
+    <td><code>route_candidate_prefilter</code></td>
+    <td><code>lexical</code></td>
+    <td>Q-K 前先用便宜 lexical 方法筛候选</td>
+  </tr>
+  <tr>
+    <td><code>route_candidate_prefilter_factor</code></td>
+    <td><code>6</code></td>
+    <td>候选池大约保留最终 chunk 预算的 6 倍</td>
+  </tr>
+  <tr>
+    <td><code>dynamic_candidate_pool_budget_map</code></td>
+    <td><code>summary:96, detail:48, balanced:56</code></td>
+    <td>根据内部 query 类型动态调整 Q-K 候选池大小</td>
+  </tr>
+  <tr>
+    <td><code>route_coarse_segment_gate</code></td>
+    <td><code>lexical</code></td>
+    <td>在 Q-K 前按粗 segment 做一次候选段控制</td>
+  </tr>
+  <tr>
+    <td><code>qk_score_batch_size</code></td>
+    <td><code>64</code></td>
+    <td>Q-K scoring 批量执行，提高 GPU 利用率</td>
+  </tr>
+  <tr>
+    <td><code>cache_candidate_keys</code></td>
+    <td><code>True</code></td>
+    <td>缓存 candidate K，减少重复准备</td>
+  </tr>
+  <tr>
+    <td><code>cache_query_q</code></td>
+    <td><code>True</code></td>
+    <td>当前 query 的 Q 只算一次，这是 TTFT 明显下降的关键执行优化</td>
+  </tr>
+  <tr>
+    <td><code>answer_prompt_style</code></td>
+    <td><code>grounded</code></td>
+    <td>回答时要求基于 selected evidence</td>
+  </tr>
+  <tr>
+    <td><code>selected_answer_context_mode</code></td>
+    <td><code>turns</code></td>
+    <td>把 selected chunks 对应的 turns 作为回答上下文</td>
+  </tr>
+  <tr>
+    <td><code>fetch_bandwidth_gbps</code></td>
+    <td><code>25.0</code></td>
+    <td>TTFT 估算里的网络带宽假设</td>
+  </tr>
+  <tr>
+    <td><code>per_node_rtt_ms</code></td>
+    <td><code>1.0</code></td>
+    <td>每访问一个 virtual node 的 RTT 假设</td>
+  </tr>
+  <tr>
+    <td><code>per_segment_overhead_ms</code></td>
+    <td><code>0.15</code></td>
+    <td>每个 transfer segment 的额外开销</td>
+  </tr>
+  <tr>
+    <td><code>decode_startup_ms</code></td>
+    <td><code>15.0</code></td>
+    <td>KV 到位后开始生成第一个 token 前的固定启动开销</td>
+  </tr>
+</table>
+
+<hr>
+
+<h3 id="sec-11-4">11.4 为什么是 99 个 case</h3>
+
+<p>这次实验范围是 <code>docs 0-20</code>，每个 doc 最多 <code>5</code> 个 query。</p>
+
+<pre><code>理论最大 case 数 =
+  20 docs * 5 queries/doc
+  = 100 cases</code></pre>
+
+<p>但实际 TSV 合并后是 <code>99</code> 个有效 case，因为 <code>doc 11</code> 只有 4 个 query case 被记录。</p>
+
+<pre><code>doc 0-10: 每个 doc 5 cases
+doc 11: 4 cases
+doc 12-19: 每个 doc 5 cases
+
+total = 99 cases</code></pre>
+
+<p>所以后面所有全局平均值都是基于这 <code>99</code> 个有效 case 算出来的。</p>
+
+<hr>
+
+<h3 id="sec-11-5">11.5 全局平均结果</h3>
+
+<p>下面这张表是四个 TSV 合并后的全局平均，不是某一个 split 的单独结果。</p>
+
+<table>
+  <tr>
+    <th>类别</th>
+    <th>指标</th>
+    <th>结果</th>
+    <th>怎么理解</th>
+  </tr>
+  <tr>
+    <td>规模</td>
+    <td>有效 case 数</td>
+    <td>99</td>
+    <td>docs 0-20，最多 5 query/doc，doc 11 少 1 个 query</td>
+  </tr>
+  <tr>
+    <td>证据命中</td>
+    <td><code>selected_turn_hit</code></td>
+    <td>79.80%</td>
+    <td>大约 8 成 case 至少命中一个 gold relevant turn</td>
+  </tr>
+  <tr>
+    <td>证据命中</td>
+    <td><code>selected_turn_recall</code></td>
+    <td>16.86%</td>
+    <td>gold turns 通常很多，而最终只选少量 chunks，所以 recall 不高</td>
+  </tr>
+  <tr>
+    <td>证据命中</td>
+    <td><code>selected_turn_precision</code></td>
+    <td>49.32%</td>
+    <td>选中的 turns 里大约一半能对上 gold evidence</td>
+  </tr>
+  <tr>
+    <td>证据命中</td>
+    <td><code>selected_turn_f1</code></td>
+    <td>20.50%</td>
+    <td>证据定位还有明显提升空间</td>
+  </tr>
+  <tr>
+    <td>候选生存</td>
+    <td>topic-filter recall</td>
+    <td>83.73%</td>
+    <td>粗路由阶段整体还可以，但会丢掉一部分 gold turns</td>
+  </tr>
+  <tr>
+    <td>候选生存</td>
+    <td>prefilter recall</td>
+    <td>59.26%</td>
+    <td>lexical prefilter 是主要压缩点之一，也带来 recall 损失</td>
+  </tr>
+  <tr>
+    <td>候选生存</td>
+    <td>dynamic-pool recall</td>
+    <td>51.25%</td>
+    <td>动态候选池继续换取更低 Q-K 计算量</td>
+  </tr>
+  <tr>
+    <td>候选生存</td>
+    <td>Q-K scored recall</td>
+    <td>48.19%</td>
+    <td>进入精排的候选大约保留了不到一半 gold turns</td>
+  </tr>
+  <tr>
+    <td>候选生存</td>
+    <td>Q-K selected recall</td>
+    <td>16.86%</td>
+    <td>最终 selected chunks 很小，所以最终 recall 回到 16.86%</td>
+  </tr>
+  <tr>
+    <td>候选规模</td>
+    <td>before prefilter</td>
+    <td>143.13 chunks</td>
+    <td>进入 lexical prefilter 前的平均候选数</td>
+  </tr>
+  <tr>
+    <td>候选规模</td>
+    <td>after prefilter</td>
+    <td>64.34 chunks</td>
+    <td>prefilter 后平均候选数</td>
+  </tr>
+  <tr>
+    <td>候选规模</td>
+    <td>Q-K scored</td>
+    <td>47.30 chunks</td>
+    <td>最终真正做 exact Q-K 的平均候选数</td>
+  </tr>
+  <tr>
+    <td>传输</td>
+    <td>selected KV</td>
+    <td>50.89 MiB</td>
+    <td>最终需要 fetch 的 KV 大小</td>
+  </tr>
+  <tr>
+    <td>传输</td>
+    <td>full KV</td>
+    <td>1662.03 MiB</td>
+    <td>full baseline 需要 fetch 的 KV 大小</td>
+  </tr>
+  <tr>
+    <td>传输</td>
+    <td>KV saving</td>
+    <td>96.53%</td>
+    <td>通信字节数大幅下降</td>
+  </tr>
+  <tr>
+    <td>传输</td>
+    <td>selected fetch latency</td>
+    <td>19.52 ms</td>
+    <td>按 25Gbps + RTT + segment overhead 估算的 selected KV fetch 时间</td>
+  </tr>
+  <tr>
+    <td>传输</td>
+    <td>full fetch latency</td>
+    <td>562.24 ms</td>
+    <td>full baseline 拉全量 KV 的估算 fetch 时间</td>
+  </tr>
+  <tr>
+    <td>传输</td>
+    <td>fetch saving</td>
+    <td>96.08%</td>
+    <td>selected fetch 比 full fetch 小很多</td>
+  </tr>
+  <tr>
+    <td>路由时间</td>
+    <td>routing wall-clock</td>
+    <td>76.47 ms</td>
+    <td>本地 simulator 实际 routing wall time</td>
+  </tr>
+  <tr>
+    <td>路由时间</td>
+    <td>simulator excluded</td>
+    <td>13.83 ms</td>
+    <td>本地 simulator 现场切 candidate K 的时间，system TTFT 中排除</td>
+  </tr>
+  <tr>
+    <td>路由时间</td>
+    <td>system routing</td>
+    <td>62.64 ms</td>
+    <td>进入 selected TTFT 的 routing compute</td>
+  </tr>
+  <tr>
+    <td>路由时间</td>
+    <td>query-Q prepare</td>
+    <td>26.29 ms</td>
+    <td>启用 query-Q cache 后，每个 query 的 Q 准备时间</td>
+  </tr>
+  <tr>
+    <td>路由时间</td>
+    <td>Q-K model inference</td>
+    <td>29.85 ms</td>
+    <td>exact Q-K scoring 中最主要的模型/张量计算部分</td>
+  </tr>
+  <tr>
+    <td>TTFT</td>
+    <td>selected TTFT</td>
+    <td>97.16 ms</td>
+    <td>system routing + selected fetch + decode startup</td>
+  </tr>
+  <tr>
+    <td>TTFT</td>
+    <td>full TTFT</td>
+    <td>577.24 ms</td>
+    <td>full fetch + decode startup</td>
+  </tr>
+  <tr>
+    <td>TTFT</td>
+    <td>TTFT saving</td>
+    <td>80.83%</td>
+    <td>当前主线最亮眼的系统结果</td>
+  </tr>
+  <tr>
+    <td>回答质量</td>
+    <td>full-answer F1</td>
+    <td>18.89%</td>
+    <td>完整上下文回答与 gold answer 的 token F1</td>
+  </tr>
+  <tr>
+    <td>回答质量</td>
+    <td>selected-answer F1</td>
+    <td>17.14%</td>
+    <td>selected context 回答与 gold answer 的 token F1</td>
+  </tr>
+  <tr>
+    <td>回答质量</td>
+    <td>oracle-answer F1</td>
+    <td>20.53%</td>
+    <td>用 gold relevant context 回答时的参考上界之一</td>
+  </tr>
+  <tr>
+    <td>回答质量</td>
+    <td>answer F1 delta</td>
+    <td>-1.75%</td>
+    <td>selected 比 full 平均低约 1.75 个百分点</td>
+  </tr>
+  <tr>
+    <td>回答质量</td>
+    <td>context token saving</td>
+    <td>95.19%</td>
+    <td>回答阶段上下文 token 大幅减少</td>
+  </tr>
+</table>
+
+<p>这些数字可以压缩成一句话：</p>
+
+<pre><code>当前主线用约 3.47% 的 KV，
+把 estimated TTFT 降低约 80.83%，
+同时 selected-answer F1 只比 full-answer F1 低约 1.75 个百分点。</code></pre>
+
+<hr>
+
+<h3 id="sec-11-6">11.6 四个 split 的结果</h3>
+
+<p>下面是每个 split 单独的摘要。它可以帮助你解释：不是某一个 doc 段偶然好，而是四段里 selected TTFT 都稳定在大约 <code>96-98 ms</code>。</p>
+
+<table>
+  <tr>
+    <th>split</th>
+    <th>n</th>
+    <th>selected-turn hit</th>
+    <th>turn recall</th>
+    <th>turn F1</th>
+    <th>selected-answer F1</th>
+    <th>context saving</th>
+    <th>KV saving</th>
+    <th>selected TTFT</th>
+    <th>full TTFT</th>
+    <th>TTFT saving</th>
+  </tr>
+  <tr>
+    <td>docs 0-5</td>
+    <td>25</td>
+    <td>68.0%</td>
+    <td>12.3%</td>
+    <td>10.5%</td>
+    <td>11.4%</td>
+    <td>95.9%</td>
+    <td>97.1%</td>
+    <td>97.19 ms</td>
+    <td>660.54 ms</td>
+    <td>83.7%</td>
+  </tr>
+  <tr>
+    <td>docs 5-10</td>
+    <td>25</td>
+    <td>84.0%</td>
+    <td>20.2%</td>
+    <td>26.7%</td>
+    <td>19.4%</td>
+    <td>94.8%</td>
+    <td>96.3%</td>
+    <td>97.45 ms</td>
+    <td>489.29 ms</td>
+    <td>75.8%</td>
+  </tr>
+  <tr>
+    <td>docs 10-15</td>
+    <td>24</td>
+    <td>91.7%</td>
+    <td>14.7%</td>
+    <td>18.9%</td>
+    <td>18.3%</td>
+    <td>95.5%</td>
+    <td>96.7%</td>
+    <td>96.17 ms</td>
+    <td>615.03 ms</td>
+    <td>82.9%</td>
+  </tr>
+  <tr>
+    <td>docs 15-20</td>
+    <td>25</td>
+    <td>76.0%</td>
+    <td>20.1%</td>
+    <td>25.8%</td>
+    <td>19.6%</td>
+    <td>94.5%</td>
+    <td>96.1%</td>
+    <td>97.79 ms</td>
+    <td>545.59 ms</td>
+    <td>80.9%</td>
+  </tr>
+</table>
+
+<p>这里有一个很重要的观察：</p>
+
+<pre><code>selected TTFT 非常稳定：
+docs 0-5:   97.19 ms
+docs 5-10:  97.45 ms
+docs 10-15: 96.17 ms
+docs 15-20: 97.79 ms</code></pre>
+
+<p>这说明 query-Q cache、batch size 64、候选池控制之后，在线 routing + fetch 的时间已经比较稳定。</p>
+
+<hr>
+
+<h3 id="sec-11-7">11.7 怎么理解“当前主线最优”</h3>
+
+<p>这里的“最优”要说清楚，不能说成所有可能方案里的数学全局最优。</p>
+
+<p>更准确的表述是：</p>
+
+<pre><code>这是当前 mainline_profile=current 下，
+最近一次完整、可复现、指标最完整的稳定主线记录。</code></pre>
+
+<p>它之所以适合作为当前主线记录，是因为：</p>
+
+<table>
+  <tr>
+    <th>原因</th>
+    <th>解释</th>
+  </tr>
+  <tr>
+    <td>范围比单 case 更可靠</td>
+    <td>不是只看一个 doc/query，而是 docs 0-20 的 99 个有效 query case</td>
+  </tr>
+  <tr>
+    <td>指标完整</td>
+    <td>同时有 evidence recall、answer F1、KV saving、fetch saving、TTFT saving</td>
+  </tr>
+  <tr>
+    <td>系统优化打开</td>
+    <td>启用了 <code>cache_query_q</code>、<code>cache_candidate_keys</code>、<code>qk_score_batch_size=64</code></td>
+  </tr>
+  <tr>
+    <td>TTFT accounting 更合理</td>
+    <td>保留 <code>routing_wall_clock_ms</code>，但 system TTFT 排除 simulator-only key slicing</td>
+  </tr>
+  <tr>
+    <td>主线边界清楚</td>
+    <td>它明确是 simulation/prototype，不伪装成完整 serving system benchmark</td>
+  </tr>
+</table>
+
+<div class="warn">
+  <p>汇报时不要说“我们已经找到全局最优参数”。更稳的说法是：“这是当前主线稳定配置下的最好完整记录，后续还可以继续做更大范围和更多 ablation。”</p>
+</div>
+
+<hr>
+
+<h3 id="sec-11-8">11.8 这次结果证明了什么</h3>
+
+<p>这次实验最强的证明点不是“回答质量超过 full context”，而是下面这个 trade-off：</p>
+
+<pre><code>极大减少 KV 传输
+同时只造成较小的回答质量下降。</code></pre>
+
+<p>具体来说：</p>
+
+<table>
+  <tr>
+    <th>证明点</th>
+    <th>对应数字</th>
+    <th>含义</th>
+  </tr>
+  <tr>
+    <td>传输减少</td>
+    <td>KV saving 96.53%</td>
+    <td>selected path 只需要拉极小一部分 KV</td>
+  </tr>
+  <tr>
+    <td>TTFT 降低</td>
+    <td>selected TTFT 97.16 ms vs full TTFT 577.24 ms</td>
+    <td>routing 的额外计算被节省的 KV fetch 时间抵消，而且还有很大收益</td>
+  </tr>
+  <tr>
+    <td>质量没有崩</td>
+    <td>selected-answer F1 17.14% vs full-answer F1 18.89%</td>
+    <td>平均只掉约 1.75 个百分点</td>
+  </tr>
+  <tr>
+    <td>上下文压缩明显</td>
+    <td>context token saving 95.19%</td>
+    <td>回答阶段看到的文本上下文也大幅减少</td>
+  </tr>
+  <tr>
+    <td>路由时间可控</td>
+    <td>system routing 62.64 ms</td>
+    <td>query-Q cache 和 batch Q-K 后，在线 routing 没有压垮 TTFT</td>
+  </tr>
+</table>
+
+<p>这就是论文里可以讲的核心系统故事：</p>
+
+<pre><code>Selective KV routing trades a small amount of online routing compute
+for a large reduction in remote KV fetch cost.</code></pre>
+
+<p>中文可以说：</p>
+
+<pre><code>选择性 KV 路由用一小段在线路由计算，
+换来了大幅减少远端 KV 拉取量，
+从而显著降低 query-time TTFT。</code></pre>
+
+<hr>
+
+<h3 id="sec-11-9">11.9 这次结果还不能证明什么</h3>
+
+<p>这一节很重要，因为老师可能会问边界。</p>
+
+<table>
+  <tr>
+    <th>不能证明的东西</th>
+    <th>原因</th>
+  </tr>
+  <tr>
+    <td>不能证明这是生产级 serving 系统</td>
+    <td>当前仍然是 simulation/prototype，没有真实远端 KV server、调度器、RDMA、GPU-to-GPU fetch</td>
+  </tr>
+  <tr>
+    <td>不能证明网络模型完全真实</td>
+    <td>TTFT 使用简化串行估算：bandwidth time + node RTT + segment overhead + decode startup</td>
+  </tr>
+  <tr>
+    <td>不能证明所有 QMSum 都稳定同样收益</td>
+    <td>这次只覆盖 train docs 0-20，后续需要更大范围 train/val/test</td>
+  </tr>
+  <tr>
+    <td>不能证明 evidence recall 已经足够高</td>
+    <td>selected-turn recall 平均 16.86%，说明证据定位仍是主要改进空间</td>
+  </tr>
+  <tr>
+    <td>不能证明 full-answer 一定比 selected-answer 好或坏</td>
+    <td>answer F1 本身受生成随机性、gold answer 风格、prompt 风格影响</td>
+  </tr>
+  <tr>
+    <td>不能证明 topic construction 已经自动解决</td>
+    <td>当前 topic/node 来自 QMSum labels；你的老师说这部分可以人工标注，所以当前主线把它作为给定条件</td>
+  </tr>
+</table>
+
+<p>所以最稳的边界表述是：</p>
+
+<pre><code>当前结果证明的是：
+在给定 topic/node 和离线 materialized KV 的设定下，
+selective KV routing 可以显著降低 query-time KV fetch 和 TTFT，
+同时保持接近 full-context 的回答 F1。</code></pre>
+
+<hr>
+
+<h3 id="sec-11-10">11.10 给老师汇报的版本</h3>
+
+<p>如果只汇报一小段，可以这样说：</p>
+
+<pre><code>我目前的 current mainline 是一个 QMSum 上的 selective KV routing prototype。
+系统假设会议上下文已经离线 prefill，并且 KV cache 已经按 topic/chunk 形式 materialized 到若干 virtual nodes。
+在线 query 到来后，系统先用 lexical/BM25 在人工或数据集给定的 topic nodes 中做粗路由，
+再在选中 topic 内用 candidate prefilter、dynamic candidate pool 和 coarse segment gate 控制 Q-K 候选池，
+最后用 query-Q cache + batched exact Q-K 对 chunks 精排，选择需要 fetch 的 KV。
+
+最近一次 current mainline 完整实验覆盖 QMSum train docs 0-20，共 99 个有效 query cases。
+平均 selected KV 为 50.89 MiB，而 full KV 为 1662.03 MiB，KV saving 达到 96.53%。
+在 25Gbps 带宽、1ms/node RTT、0.15ms/segment overhead、15ms decode startup 的估算模型下，
+selected TTFT 为 97.16 ms，full TTFT 为 577.24 ms，TTFT saving 为 80.83%。
+回答质量方面，full-answer F1 为 18.89%，selected-answer F1 为 17.14%，平均只下降 1.75 个百分点。
+
+所以这次结果说明：在当前设定下，selective KV routing 能用很小的在线 routing compute，
+换来大幅减少远端 KV fetch，从而显著降低 TTFT，同时保持接近 full-context 的回答质量。
+当前还不是完整 serving system，而是一个系统原型和仿真评估；后续需要扩大数据范围、补充真实分布式实现或更强网络模型。</code></pre>
+
+<hr>
+
+<h3 id="sec-11-11">11.11 本地证据文件</h3>
+
+<p>这份第 11 章的数字主要来自下面这些本地文件。</p>
+
+<table>
+  <tr>
+    <th>文件</th>
+    <th>作用</th>
+  </tr>
+  <tr>
+    <td><code>logs/qmsum_survival_split_0_20_q5/summary.txt</code></td>
+    <td>确认四个 split 都完成，并记录 output tags</td>
+  </tr>
+  <tr>
+    <td><code>logs/qmsum_survival_split_0_20_q5/docs_0_5_gpu4/current_mainline.log</code></td>
+    <td>docs 0-5 的完整日志和 summary</td>
+  </tr>
+  <tr>
+    <td><code>logs/qmsum_survival_split_0_20_q5/docs_5_10_gpu5/current_mainline.log</code></td>
+    <td>docs 5-10 的完整日志和 summary</td>
+  </tr>
+  <tr>
+    <td><code>logs/qmsum_survival_split_0_20_q5/docs_10_15_gpu6/current_mainline.log</code></td>
+    <td>docs 10-15 的完整日志和 summary</td>
+  </tr>
+  <tr>
+    <td><code>logs/qmsum_survival_split_0_20_q5/docs_15_20_gpu7/current_mainline.log</code></td>
+    <td>docs 15-20 的完整日志和 summary</td>
+  </tr>
+  <tr>
+    <td><code>outputs/qmsum_case_summary_N4_*_current_mainline_*_q5.tsv</code></td>
+    <td>逐 case 指标；全局平均就是从四个 TSV 合并计算出来的</td>
+  </tr>
+  <tr>
+    <td><code>scripts_qmsum/run_qmsum_current_mainline.sh</code></td>
+    <td>单个 current mainline run 的入口脚本</td>
+  </tr>
+  <tr>
+    <td><code>scripts_qmsum/run_qmsum_current_mainline_4gpu_split.sh</code></td>
+    <td>多 GPU split run 的入口脚本</td>
+  </tr>
+  <tr>
+    <td><code>qmsum_mainline_config.py</code></td>
+    <td><code>mainline_profile=current</code> 的默认配置来源</td>
+  </tr>
+</table>
+
+</body>
+</html>

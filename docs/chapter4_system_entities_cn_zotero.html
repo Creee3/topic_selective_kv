@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>第 4 章：系统实体</title>
+<style>
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+  color: #1f2933;
+  line-height: 1.75;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 40px 28px 80px;
+  background: #ffffff;
+}
+h2 {
+  font-size: 24px;
+  margin: 0 0 24px;
+  border-bottom: 2px solid #d8dee9;
+  padding-bottom: 14px;
+}
+h3 {
+  font-size: 18px;
+  margin-top: 30px;
+  color: #243b53;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 6px;
+}
+p { margin: 12px 0; }
+code {
+  font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  background: #f3f4f6;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+pre {
+  background: #0f172a;
+  color: #e5e7eb;
+  padding: 14px 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.toc {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 24px 0 34px;
+}
+.toc h3 {
+  margin-top: 0;
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.toc ol { margin: 0; padding-left: 22px; }
+.toc li { margin: 4px 0; }
+hr {
+  border: 0;
+  border-top: 1px solid #e5e7eb;
+  margin: 28px 0;
+}
+a { color: #2563eb; text-decoration: none; }
+</style>
+</head>
+<body>
+<h2>第 4 章：系统实体</h2>
+
+<div class="toc">
+<h3>目录</h3>
+<ol>
+  <li><a href="#sec-4-0">4.0 这一章到底在讲什么</a></li>
+  <li><a href="#sec-4-1">4.1 总体地图</a></li>
+  <li><a href="#sec-4-2">4.2 topic node</a></li>
+  <li><a href="#sec-4-3">4.3 topic_id 和 source_topic_idx 为什么不是一个东西</a></li>
+  <li><a href="#sec-4-4">4.4 gap topic</a></li>
+  <li><a href="#sec-4-5">4.5 deployable node</a></li>
+  <li><a href="#sec-4-6">4.6 virtual node</a></li>
+  <li><a href="#sec-4-7">4.7 chunk</a></li>
+  <li><a href="#sec-4-8">4.8 transfer segment</a></li>
+  <li><a href="#sec-4-9">4.9 一个完整例子</a></li>
+  <li><a href="#sec-4-10">4.10 代码位置</a></li>
+  <li><a href="#sec-4-11">4.11 给老师讲的版本</a></li>
+  <li><a href="#sec-4-12">4.12 本章核心记忆</a></li>
+</ol>
+</div>
+
+<h3 id="sec-4-0">4.0 这一章到底在讲什么</h3>
+
+<p>第 3 章讲的是 Q-K attention 原理，也就是：</p>
+
+<pre><code>query 怎么给历史 chunk 打分？</code></pre>
+
+<p>第 4 章换一个角度，它不讲数学，而是讲系统里的对象：</p>
+
+<pre><code>被打分的 chunk 从哪里来？
+chunk 属于哪个 topic？
+topic 被放在哪个 node？
+最后传输时到底算几个 segment？</code></pre>
+
+<p>所以第 4 章可以理解成你的工程实体字典。它负责把 QMSum 里的一场会议，改造成可以路由、可以选择、可以传输、可以评估的系统对象。</p>
+
+<hr>
+
+<h3 id="sec-4-1">4.1 总体地图</h3>
+
+<p>你的工程里，实体大概是这样一层层来的：</p>
+
+<pre><code>QMSum meeting
+-> transcript turns
+-> topic_list
+-> topic node
+-> virtual / deployable node
+-> token chunks
+-> selected chunks
+-> transfer segments</code></pre>
+
+<p>换成更口语的版本：</p>
+
+<pre><code>一场会议
+-> 很多轮对话
+-> 数据集标好的主题
+-> 每个主题变成一个 topic node
+-> topic node 被分配到模拟的远端节点
+-> topic 里的 turn 被切成 chunk
+-> query 来了以后选一些 chunk
+-> 连续 chunk 合并成 transfer segment</code></pre>
+
+<p>这一章最重要的不是背名词，而是知道每个实体回答什么问题：</p>
+
+<pre><code>topic node:
+  语义怎么分？
+
+virtual node:
+  假设分布式存储时，东西放在哪个节点？
+
+chunk:
+  Q-K 具体给哪一小段 KV 打分？
+
+transfer segment:
+  最后网络上要传几个连续片段？</code></pre>
+
+<hr>
+
+<h3 id="sec-4-2">4.2 topic node</h3>
+
+<p><code>topic node</code> 是系统里的语义节点。</p>
+
+<p>它来自 QMSum 数据集里的 <code>topic_list</code>。比如一场会议可能有这些主题：</p>
+
+<pre><code>topic 0: remote colour and logo
+topic 1: battery and power
+topic 2: button design</code></pre>
+
+<p>每个 topic 不只是一个名字，它还会对应一组会议 turn。比如：</p>
+
+<pre><code>topic 0: remote colour and logo
+covers turns: [3, 4, 5, 9, 10]</code></pre>
+
+<p>代码会把它变成类似这样的对象：</p>
+
+<pre><code>{
+  "topic_id": 0,
+  "source_topic_idx": 0,
+  "label": "remote colour and logo",
+  "turns": [3, 4, 5, 9, 10],
+  "is_gap": False
+}</code></pre>
+
+<p>字段逐个拆开：</p>
+
+<pre><code>topic_id:
+  工程内部重新编号的 topic。
+
+source_topic_idx:
+  它原来在 QMSum topic_list 里的编号。
+
+label:
+  这个 topic 的文字标签。
+
+turns:
+  这个 topic 覆盖哪些会议 turn。
+
+is_gap:
+  它是不是代码补出来的兜底 topic。</code></pre>
+
+<p>为什么要有 topic node？因为原始会议太长，系统不能永远面对一整坨 transcript。topic node 就像给长会议做一个语义目录。</p>
+
+<pre><code>没有 topic node:
+  query 要在整场会议里找信息。
+
+有 topic node:
+  query 可以先判断大概应该去哪个主题里找。</code></pre>
+
+<p>所以 topic node 是后面 coarse routing 的基础。</p>
+
+<hr>
+
+<h3 id="sec-4-3">4.3 topic_id 和 source_topic_idx 为什么不是一个东西</h3>
+
+<p>你看到这个对象时，很容易觉得它多此一举：</p>
+
+<pre><code>{
+  "topic_id": 0,
+  "source_topic_idx": 0
+}</code></pre>
+
+<p>因为在很多干净样本里，它们确实刚好相等。但它们的含义不一样。</p>
+
+<pre><code>source_topic_idx:
+  数据集原始 topic_list 里的下标。
+  它回答：这个 topic 原来来自 QMSum 的第几个 topic？
+
+topic_id:
+  工程内部重新分配的 topic node 编号。
+  它回答：在当前工程构造出来的 topic_nodes 列表里，它是第几个节点？</code></pre>
+
+<p>为什么代码要重新编号？因为原始 QMSum topic 不一定都能变成有效 topic。</p>
+
+<p>假设原始数据里有 4 个 topic：</p>
+
+<pre><code>topic_list[0] = A，有相关 turns
+topic_list[1] = B，没有相关 turns
+topic_list[2] = C，有相关 turns
+topic_list[3] = D，有相关 turns</code></pre>
+
+<p>代码会跳过没有相关 turns 的 B。于是如果只沿用原始编号，内部 topic 会变成：</p>
+
+<pre><code>A -> 0
+C -> 2
+D -> 3</code></pre>
+
+<p>中间缺了 <code>1</code>。这不是绝对不能用，但后续很多地方会更别扭，比如：</p>
+
+<pre><code>把 topic 放进数组
+把 topic 分配到 virtual node
+统计 topic 数量
+按 topic_id 排序
+构造 topic_to_node 映射</code></pre>
+
+<p>所以代码用连续的内部编号：</p>
+
+<pre><code>A -> topic_id 0, source_topic_idx 0
+C -> topic_id 1, source_topic_idx 2
+D -> topic_id 2, source_topic_idx 3</code></pre>
+
+<p>这样工程内部处理很干净：</p>
+
+<pre><code>topic_id = 0, 1, 2</code></pre>
+
+<p>同时又没有丢掉原始来源：</p>
+
+<pre><code>source_topic_idx 还能告诉你：
+这个内部 topic 原来对应 QMSum topic_list 里的哪一个。</code></pre>
+
+<p>再加上 <code>gap topic</code> 之后，这个区别更明显：</p>
+
+<pre><code>gap_0 -> topic_id 3, source_topic_idx -1</code></pre>
+
+<p>这里 <code>source_topic_idx = -1</code> 表示：</p>
+
+<pre><code>这个 topic 不是 QMSum 原始 topic_list 里的东西，
+而是工程为了覆盖未标注 turns 临时补出来的。</code></pre>
+
+<p>所以这两个字段不是重复，而是分别服务两个需求：</p>
+
+<pre><code>topic_id:
+  给工程内部用。
+  要连续、干净、方便索引。
+
+source_topic_idx:
+  给数据追溯用。
+  保留它在原始 QMSum topic_list 里的身份。</code></pre>
+
+<p>可以用一句话记：</p>
+
+<pre><code>topic_id 是系统内部座位号；
+source_topic_idx 是数据集原始身份证号。</code></pre>
+
+<hr>
+
+<h3 id="sec-4-4">4.4 gap topic</h3>
+
+<p>代码里还有一个容易忽略的小东西：<code>gap topic</code>。</p>
+
+<p>QMSum 的 <code>topic_list</code> 不一定覆盖所有 turn。有些会议 turn 可能不属于任何标注 topic。</p>
+
+<p>如果系统完全丢掉这些 turn，后面 token 坐标和候选 chunk 都可能不完整。所以代码会把没被 topic 覆盖的连续 turn 装进一个临时 topic：</p>
+
+<pre><code>{
+  "topic_id": 5,
+  "source_topic_idx": -1,
+  "label": "gap_0",
+  "turns": [16, 17],
+  "is_gap": True
+}</code></pre>
+
+<p>它的意思是：</p>
+
+<pre><code>这些 turn 没有被 QMSum 正式 topic 覆盖，
+但工程里仍然要保留它们，
+所以临时塞进 gap_0。</code></pre>
+
+<p>注意，gap topic 不是你的研究贡献，也不是人工定义的语义节点。它只是代码为了不丢数据做的兜底。</p>
+
+<hr>
+
+<h3 id="sec-4-5">4.5 deployable node</h3>
+
+<p><code>deployable node</code> 是论文叙事里的说法。它表示：</p>
+
+<pre><code>一个可以被部署、存储、路由、fetch 的语义单元。</code></pre>
+
+<p>你现在工程里有一个重要假设：</p>
+
+<pre><code>topic nodes 是人工或数据集提供的。
+我们不研究 topic discovery。
+我们从已经给好的 topic nodes 出发，研究怎么选择性 fetch KV。</code></pre>
+
+<p>也就是说，QMSum 的 topic label 在当前实验里被当成 deployable semantic node 的来源。</p>
+
+<p>这个边界很重要。你给老师汇报时不要说：</p>
+
+<pre><code>我们自动发现了高质量 topic nodes。</code></pre>
+
+<p>更准确的说法是：</p>
+
+<pre><code>我们假设 semantic topic nodes 已经由人工或数据集提供；
+本文关注在这些 nodes 已知的情况下，
+如何根据 query 选择性传输相关 KV。</code></pre>
+
+<p>这也和你老师说的“topic node 可以人工标注”是一致的。</p>
+
+<hr>
+
+<h3 id="sec-4-6">4.6 virtual node</h3>
+
+<p><code>virtual node</code> 是当前 prototype 里模拟出来的远端节点。</p>
+
+<p>你之前觉得 virtual node 和 node 像一个东西，这个直觉基本对。但要分清：</p>
+
+<pre><code>node:
+  真实系统里的远端机器、KV server 或存储节点。
+
+virtual node:
+  你当前代码里模拟出来的节点，用来估计分布式 fetch 成本。</code></pre>
+
+<p>因为你现在没有真的部署 4 台机器，所以代码用 <code>NUM_NODES=4</code> 来模拟：</p>
+
+<pre><code>如果这些 topic 分布在 4 个远端节点上，会怎么样？</code></pre>
+
+<p>比如有 6 个 topic，4 个 virtual nodes，可以这样放：</p>
+
+<pre><code>virtual node 0: topic 0, topic 1
+virtual node 1: topic 2
+virtual node 2: topic 3
+virtual node 3: topic 4, topic 5</code></pre>
+
+<p>如果 query 最后选中了 topic 2 和 topic 5 里的 chunks，那么系统认为要访问：</p>
+
+<pre><code>virtual node 1
+virtual node 3</code></pre>
+
+<p>这就是 virtual node 的作用：它让你能估计 node-level 的系统代价。</p>
+
+<pre><code>选中了几个 topic？
+这些 topic 分布在几个 virtual nodes 上？
+需要访问几个远端节点？
+每个节点上有几个连续传输片段？</code></pre>
+
+<p>所以 virtual node 是从算法实验走向系统评估的一层桥。</p>
+
+<hr>
+
+<h3 id="sec-4-7">4.7 chunk</h3>
+
+<p><code>chunk</code> 是 Q-K fine routing 真正打分的单位。</p>
+
+<p>topic 太大，不适合整个传。turn 也可能比较长，所以代码会把 turn 按 token 切成小块。</p>
+
+<p>当前主线里常用：</p>
+
+<pre><code>route_chunk_size = 128</code></pre>
+
+<p>意思是：</p>
+
+<pre><code>每个候选 chunk 大约 128 tokens。</code></pre>
+
+<p>一个 chunk 对象大概长这样：</p>
+
+<pre><code>{
+  "candidate_id": 17,
+  "turn_idx": 9,
+  "local_chunk_idx": 0,
+  "topic_ids": [2],
+  "start_t": 1200,
+  "end_t": 1328,
+  "n_tokens": 128
+}</code></pre>
+
+<p>字段逐个解释：</p>
+
+<pre><code>candidate_id:
+  全局候选 chunk 编号。
+
+turn_idx:
+  这个 chunk 来自第几个 turn。
+
+local_chunk_idx:
+  在这个 turn 内部是第几个 chunk。
+
+topic_ids:
+  这个 turn 属于哪些 topic，所以 chunk 也继承这些 topic。
+
+start_t / end_t:
+  这个 chunk 在整场会议 token 序列里的 token 坐标。
+
+n_tokens:
+  这个 chunk 有多少 tokens。</code></pre>
+
+<p>chunk 是一个很关键的桥：</p>
+
+<pre><code>语义上：
+  它属于某个 topic。
+
+系统上：
+  它对应一段 KV cache。
+
+算法上：
+  它是 Q-K 打分和排序的候选单位。</code></pre>
+
+<hr>
+
+<h3 id="sec-4-8">4.8 transfer segment</h3>
+
+<p><code>transfer segment</code> 是传输层面的概念。</p>
+
+<p>假设 Q-K 最后选中了这些 chunks：</p>
+
+<pre><code>chunk 0: tokens [100, 228)
+chunk 1: tokens [228, 356)
+chunk 2: tokens [900, 1028)</code></pre>
+
+<p>前两个 chunk 是连续的：</p>
+
+<pre><code>[100, 228) + [228, 356)
+= [100, 356)</code></pre>
+
+<p>所以真实传输时，可以把它们合并成一个连续片段：</p>
+
+<pre><code>segment 0: [100, 356)
+segment 1: [900, 1028)</code></pre>
+
+<p>这就是 transfer segment。</p>
+
+<p>为什么它重要？因为网络传输不只看总 token 数，也看碎片数量。</p>
+
+<pre><code>传 12 个分散 chunk：
+  可能有很多次打包、调度、请求开销。
+
+传 12 个连续 chunk：
+  可能可以合并成更少的 segment，传输更顺。</code></pre>
+
+<p>所以你的工程会统计：</p>
+
+<pre><code>selected_chunk_count:
+  选了几个 chunks。
+
+transfer_segment_count:
+  合并连续 chunk 后，需要传几个 segments。
+
+coalescing_gain:
+  合并连续片段带来了多少节省。</code></pre>
+
+<p>这里的重点是：</p>
+
+<pre><code>chunk 是选择单位；
+segment 是传输统计单位。</code></pre>
+
+<p>这两个不能混。</p>
+
+<hr>
+
+<h3 id="sec-4-9">4.9 一个完整例子</h3>
+
+<p>现在把所有实体串起来。</p>
+
+<p>假设 query 是：</p>
+
+<pre><code>What colour was chosen for the remote?</code></pre>
+
+<p>QMSum 里有一个 topic：</p>
+
+<pre><code>topic 0:
+  label = remote colour and logo
+  turns = [3, 4, 5, 9, 10]</code></pre>
+
+<p>系统把它当成一个 topic node：</p>
+
+<pre><code>topic node 0 = remote colour and logo</code></pre>
+
+<p>然后虚拟部署时，topic 0 被放到：</p>
+
+<pre><code>virtual node 2</code></pre>
+
+<p>query 进来后，coarse routing 先选中：</p>
+
+<pre><code>selected topic = topic 0</code></pre>
+
+<p>然后系统只在 topic 0 里面切 chunk、打 Q-K 分数。假设最后选中了：</p>
+
+<pre><code>selected chunks:
+  chunk 3: tokens [1000, 1128)
+  chunk 4: tokens [1128, 1256)
+  chunk 9: tokens [1800, 1928)</code></pre>
+
+<p>传输统计时，chunk 3 和 chunk 4 是连续的，所以可以合并：</p>
+
+<pre><code>transfer segment 0: [1000, 1256)
+transfer segment 1: [1800, 1928)</code></pre>
+
+<p>最终这个 query 的系统结果可以这样说：</p>
+
+<pre><code>selected topic:
+  topic 0
+
+selected virtual node:
+  node 2
+
+selected chunks:
+  3 个
+
+transfer segments:
+  2 个</code></pre>
+
+<p>这就是第四章所有实体之间的关系。</p>
+
+<hr>
+
+<h3 id="sec-4-10">4.10 代码位置</h3>
+
+<p>第四章对应的主要代码位置是：</p>
+
+<pre><code>qmsum_data.py
+  build_topic_nodes(...)
+  从 QMSum topic_list 构造 topic nodes。</code></pre>
+
+<pre><code>qmsum_mainline_routing.py
+  build_mainline_topic_index_qmsum(...)
+  给 topic nodes 构造用于 lexical routing 的表示。</code></pre>
+
+<pre><code>qmsum_mainline_routing.py
+  assign_topics_to_virtual_nodes(...)
+  把 topic nodes 分配到 virtual nodes。</code></pre>
+
+<pre><code>qmsum_mainline_routing.py
+  build_hierarchical_candidates(...)
+  把 turn 的 token span 切成 chunk candidates。</code></pre>
+
+<pre><code>qmsum_eval.py
+  build_transfer_accounting(...)
+  统计 selected chunks、transfer segments、coalescing gain。</code></pre>
+
+<p>当前主线脚本里也能看到系统设定：</p>
+
+<pre><code>scripts_qmsum/run_qmsum_current_mainline.sh
+  NUM_NODES=4
+  --mainline_profile current</code></pre>
+
+<p>当前 profile 的核心设定是：</p>
+
+<pre><code>manually/dataset labeled topics as deployable semantic nodes
+-> lexical top-1 topic routing
+-> Q-K chunk scoring
+-> virtual-node transfer accounting</code></pre>
+
+<hr>
+
+<h3 id="sec-4-11">4.11 给老师讲的版本</h3>
+
+<p>你可以这样讲第四章：</p>
+
+<pre><code>我的系统首先把 QMSum 会议按数据集给定的 topic labels
+构造成 topic nodes。
+
+每个 topic node 覆盖一组 transcript turns，
+表示一个可部署的语义单元。
+
+然后系统把这些 topic nodes 分配到若干 virtual nodes 上，
+用来模拟分布式 KV cache 存储。
+
+在线 query 到来时，系统先选 topic node，
+再在 topic 内把 turns 切成 token chunks，
+用 Q-K attention affinity 选择最相关的 chunks。
+
+最后，我们把被选中的 chunks 按连续 token 区间合并成 transfer segments，
+从而估计实际需要传输的 KV 量、节点数和网络片段数。</code></pre>
+
+<hr>
+
+<h3 id="sec-4-12">4.12 本章核心记忆</h3>
+
+<p>这一章只需要牢牢记住这四个区别：</p>
+
+<pre><code>topic node:
+  语义节点，回答“这段会议讲什么”。
+
+deployable node:
+  论文里的部署抽象，表示可以被存储和路由的语义单元。
+
+virtual node:
+  当前代码里模拟的远端节点，回答“这些 topic 假装放在哪台机器上”。
+
+chunk:
+  Q-K 打分单位，回答“具体哪一小段 KV 值得传”。
+
+transfer segment:
+  网络传输统计单位，回答“最后要传几个连续片段”。</code></pre>
+
+<p>最短链条是：</p>
+
+<pre><code>meeting
+-> topic node
+-> virtual node
+-> chunk
+-> selected chunk
+-> transfer segment</code></pre>
+
+<p>这就是第四章的骨架。</p>
+
+</body>
+</html>

@@ -1,0 +1,770 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>第 9 章：Q-K 细路由与 chunk 精排</title>
+<style>
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+  color: #1f2933;
+  line-height: 1.78;
+  max-width: 940px;
+  margin: 0 auto;
+  padding: 40px 28px 84px;
+  background: #ffffff;
+}
+h2 {
+  font-size: 25px;
+  margin: 0 0 24px;
+  border-bottom: 2px solid #d8dee9;
+  padding-bottom: 14px;
+}
+h3 {
+  font-size: 18px;
+  margin-top: 32px;
+  color: #243b53;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 6px;
+}
+p { margin: 12px 0; }
+code {
+  font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  background: #f3f4f6;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+pre {
+  background: #0f172a;
+  color: #e5e7eb;
+  padding: 14px 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.toc {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 24px 0 34px;
+}
+.toc h3 {
+  margin-top: 0;
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.toc ol { margin: 0; padding-left: 22px; }
+.toc li { margin: 4px 0; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0 22px;
+  font-size: 14px;
+}
+th, td {
+  border: 1px solid #d8dee9;
+  padding: 8px 10px;
+  vertical-align: top;
+}
+th {
+  background: #f1f5f9;
+  text-align: left;
+}
+.note {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 16px 0;
+}
+.key {
+  background: #ecfdf5;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 16px 0;
+}
+hr {
+  border: 0;
+  border-top: 1px solid #e5e7eb;
+  margin: 30px 0;
+}
+a { color: #2563eb; text-decoration: none; }
+</style>
+</head>
+<body>
+<h2>第 9 章：Q-K 细路由与 chunk 精排</h2>
+
+<div class="toc">
+<h3>目录</h3>
+<ol>
+  <li><a href="#sec-9-0">9.0 本章一句话</a></li>
+  <li><a href="#sec-9-1">9.1 第九章在系统里的位置</a></li>
+  <li><a href="#sec-9-2">9.2 Q-K fine routing 到底在算什么</a></li>
+  <li><a href="#sec-9-3">9.3 exact Q-K 的代码入口</a></li>
+  <li><a href="#sec-9-4">9.4 candidate chunk 的 K 从哪里来</a></li>
+  <li><a href="#sec-9-5">9.5 query 的 Q 从哪里来</a></li>
+  <li><a href="#sec-9-6">9.6 QK^T 公式和代码怎么对应</a></li>
+  <li><a href="#sec-9-7">9.7 为什么 K 要从 8 个 head 扩到 32 个 head</a></li>
+  <li><a href="#sec-9-8">9.8 token 矩阵如何变成每个 head 一个分数</a></li>
+  <li><a href="#sec-9-9">9.9 多 layer 如何聚合</a></li>
+  <li><a href="#sec-9-10">9.10 chunk scalar 是什么</a></li>
+  <li><a href="#sec-9-11">9.11 route_per_head=True 在做什么</a></li>
+  <li><a href="#sec-9-12">9.12 一个完整数字例子</a></li>
+  <li><a href="#sec-9-13">9.13 第九章最终输出是什么</a></li>
+  <li><a href="#sec-9-14">9.14 第八章和第九章的边界</a></li>
+  <li><a href="#sec-9-15">9.15 给老师汇报的版本</a></li>
+</ol>
+</div>
+
+<h3 id="sec-9-0">9.0 本章一句话</h3>
+
+<p>第九章讲的是细路由，也就是在第八章留下来的候选 chunk 里，用模型自己的 Q-K attention affinity 做精排。</p>
+
+<pre><code>第九章 =
+  对每个 candidate chunk 取历史 K，
+  对当前 query 算 Q，
+  用 QK^T 算 attention affinity，
+  把 token / head / layer 分数聚合成 chunk 分数，
+  最后选出 selected_candidates。</code></pre>
+
+<div class="key">
+  <p><strong>核心记忆：</strong>第九章不是普通 retrieval。普通 retrieval 通常在外部 embedding 空间里比较 query 和文本；你的 Q-K routing 是在 LLM 自己的 attention 空间里比较 query 的 Q 和历史 chunk 的 K。</p>
+</div>
+
+<hr>
+
+<h3 id="sec-9-1">9.1 第九章在系统里的位置</h3>
+
+<p>完整链条是：</p>
+
+<pre><code>第 7 章：coarse routing
+  query -> 选 topic
+
+第 8 章：candidate control
+  selected topic 内 chunks -> candidates_to_score
+
+第 9 章：fine routing
+  candidates_to_score -> Q-K 精排 -> selected_candidates</code></pre>
+
+<p>所以第九章的输入不是全会议所有 chunk，而是第八章已经筛过的一批候选。</p>
+
+<pre><code>输入：
+query_ids
+candidates_to_score
+完整历史 prompt 的 KV cache
+scoring_layers
+model
+
+输出：
+selected_candidates</code></pre>
+
+<p>如果第八章把 521 个 topic 内 chunk 压到 48 个，那么第九章通常只对这 48 个 chunk 做 exact Q-K。</p>
+
+<hr>
+
+<h3 id="sec-9-2">9.2 Q-K fine routing 到底在算什么</h3>
+
+<p>核心公式是：</p>
+
+<pre><code>attention_affinity(query, chunk) = Q(query) K(chunk)^T / sqrt(head_dim)</code></pre>
+
+<p>直觉上就是：</p>
+
+<pre><code>query 的 Q 和某个历史 chunk 的 K 越对齐，
+这个 chunk 对当前 query 越可能重要。</code></pre>
+
+<p>但是工程里不是一个简单向量点积，而是多个维度一起算：</p>
+
+<pre><code>多个 layer
+多个 head
+多个 query token
+多个 chunk token
+每个 head 内 128 维向量</code></pre>
+
+<p>当前 Mistral 类模型大概是：</p>
+
+<pre><code>hidden_size = 4096
+num_attention_heads = 32
+num_key_value_heads = 8
+head_dim = 128</code></pre>
+
+<p><code>head_dim=128</code> 来自：</p>
+
+<pre><code>4096 / 32 = 128</code></pre>
+
+<p>所以在每个 attention head 里，Q 和 K 都是 128 维向量。</p>
+
+<hr>
+
+<h3 id="sec-9-3">9.3 exact Q-K 的代码入口</h3>
+
+<p>第九章最核心的入口是 <code>qmsum_mainline_routing.py</code> 里的：</p>
+
+<pre><code>def score_candidates_exact_qk_batched(...)</code></pre>
+
+<p>它的作用是：</p>
+
+<pre><code>对 candidates_to_score 分 batch，
+取每个 candidate 的 K，
+拿 query 的 Q，
+计算 Q-K 分数，
+返回 scored_candidates。</code></pre>
+
+<p>主线里调用它的位置大概是：</p>
+
+<pre><code>scored_candidates, per_head_scores, candidate_key_cache_stats =
+    score_candidates_exact_qk_batched(
+        kv_3d,
+        candidates_to_score,
+        query_ids,
+        model,
+        scoring_layers,
+        split_kv,
+        qk_score_fn,
+        qk_aggregation=args.qk_aggregation,
+        qk_topk=args.qk_topk,
+        batch_size=args.qk_score_batch_size,
+        candidate_key_cache=candidate_key_cache,
+        cache_enabled=args.cache_candidate_keys,
+        query_q_cache=query_q_cache,
+        cached_qk_score_fn=cached_qk_score_fn,
+    )</code></pre>
+
+<p>这里的 <code>scored_candidates</code> 就是每个 chunk 已经带上 Q-K scalar 分数后的候选。</p>
+
+<hr>
+
+<h3 id="sec-9-4">9.4 candidate chunk 的 K 从哪里来</h3>
+
+<p>每个 candidate chunk 都有 token 坐标：</p>
+
+<pre><code>start_t
+end_t
+n_tokens</code></pre>
+
+<p>比如一个 candidate 可能是：</p>
+
+<pre><code>candidate_id = 728
+start_t = 13624
+end_t = 13666
+n_tokens = 42</code></pre>
+
+<p>这表示这个 chunk 对应完整 prompt 里的 token 范围：</p>
+
+<pre><code>[13624, 13666)</code></pre>
+
+<p>系统已经对完整会议 prompt 做过 prefill，所以完整历史 KV cache 已经存在。第九章要做的是从完整 KV cache 里切出这个 chunk 的 K。</p>
+
+<pre><code>完整历史 KV cache
+  -> 按 start_t / end_t 切出 candidate chunk
+  -> 得到 K(chunk)</code></pre>
+
+<p>一个 chunk 的 K 大概可以理解成：</p>
+
+<pre><code>K_chunk:
+  layer 0 的 K
+  layer 1 的 K
+  ...
+  layer 31 的 K</code></pre>
+
+<p>每一层 K 的形状近似是：</p>
+
+<pre><code>(num_key_value_heads, chunk_len, head_dim)</code></pre>
+
+<p>代入当前模型就是：</p>
+
+<pre><code>(8, chunk_len, 128)</code></pre>
+
+<hr>
+
+<h3 id="sec-9-5">9.5 query 的 Q 从哪里来</h3>
+
+<p>query 先被 tokenizer 转成 token ids：</p>
+
+<pre><code>query_ids = tokenizer(query_text, return_tensors="pt").input_ids.cuda()</code></pre>
+
+<p>然后模型对 query 做一次 forward，取出对应 layer 的 hidden state，再经过这一层的 <code>q_proj</code> 得到 Q。</p>
+
+<pre><code>hidden = outputs.hidden_states[layer_idx]
+q_tensor = q_proj(hidden)
+q_tensor = q_tensor.view(1, -1, num_heads, head_dim).transpose(1, 2)</code></pre>
+
+<p>得到的 Q 形状是：</p>
+
+<pre><code>Q: (1, 32, query_len, 128)</code></pre>
+
+<p>每一维含义是：</p>
+
+<pre><code>1:
+  batch size
+
+32:
+  attention heads
+
+query_len:
+  query 有多少 token
+
+128:
+  每个 head 里的向量维度</code></pre>
+
+<p>当前主线启用了 <code>cache_query_q=True</code>，所以同一个 query 的 Q 只算一次，然后后续 candidate batch 复用。</p>
+
+<pre><code>query-Q cache:
+  对一个 query，只 forward 一次。
+  一次性缓存多个 scoring layer 的 Q。
+  后续所有 candidate batch 直接复用这些 Q。</code></pre>
+
+<hr>
+
+<h3 id="sec-9-6">9.6 QK^T 公式和代码怎么对应</h3>
+
+<p>核心代码是：</p>
+
+<pre><code>attn = torch.matmul(Q, K_layer.transpose(-2, -1)) / scale</code></pre>
+
+<p>其中：</p>
+
+<pre><code>scale = sqrt(head_dim)</code></pre>
+
+<p>对应公式：</p>
+
+<pre><code>attn = Q K^T / sqrt(head_dim)</code></pre>
+
+<p>如果某个 query 有 8 个 token，candidate chunk 有 42 个 token，那么形状是：</p>
+
+<pre><code>Q:
+  (1, 32, 8, 128)
+
+K:
+  (1, 32, 42, 128)
+
+K^T:
+  (1, 32, 128, 42)
+
+QK^T:
+  (1, 32, 8, 42)</code></pre>
+
+<p>这个 <code>(1, 32, 8, 42)</code> 的意思是：</p>
+
+<pre><code>1 个 batch；
+32 个 heads；
+query 的每个 token；
+chunk 的每个 token；
+两两都有一个 affinity 分数。</code></pre>
+
+<p>所以一个 head 里会有一个 <code>query_len × chunk_len</code> 的矩阵。</p>
+
+<pre><code>如果 query_len = 8, chunk_len = 42：
+每个 head 里有一个 8 × 42 的分数矩阵。</code></pre>
+
+<p><code>affinity</code> 可以理解成未经过 softmax 的 attention 亲和度。它不是最终生成答案时真正使用的 attention 权重，而是你拿来做 routing 的相关性信号。</p>
+
+<hr>
+
+<h3 id="sec-9-7">9.7 为什么 K 要从 8 个 head 扩到 32 个 head</h3>
+
+<p>当前模型不是每个 Q head 都有一个独立 KV head。它是 grouped-query attention 类结构。</p>
+
+<pre><code>num_attention_heads = 32
+num_key_value_heads = 8</code></pre>
+
+<p>也就是说：</p>
+
+<pre><code>Q 有 32 个 heads；
+K/V 只有 8 个 KV heads。</code></pre>
+
+<p>但是做 QK^T 的时候，Q 和 K 的 head 数需要对齐，所以代码有：</p>
+
+<pre><code>if num_kv_heads != num_heads:
+    n_rep = num_heads // num_kv_heads
+    K_layer = K_layer.repeat_interleave(n_rep, dim=1)</code></pre>
+
+<p>当前：</p>
+
+<pre><code>n_rep = 32 / 8 = 4</code></pre>
+
+<p>意思是：</p>
+
+<pre><code>每个 KV head 复制给 4 个 query heads 使用。</code></pre>
+
+<p>复制前：</p>
+
+<pre><code>K: (1, 8, chunk_len, 128)</code></pre>
+
+<p>复制后：</p>
+
+<pre><code>K: (1, 32, chunk_len, 128)</code></pre>
+
+<p>这样才能和 Q 的形状对齐：</p>
+
+<pre><code>Q: (1, 32, query_len, 128)
+K: (1, 32, chunk_len, 128)</code></pre>
+
+<hr>
+
+<h3 id="sec-9-8">9.8 token 矩阵如何变成每个 head 一个分数</h3>
+
+<p>QK^T 得到的是四维矩阵：</p>
+
+<pre><code>attn: (1, 32, query_len, chunk_len)</code></pre>
+
+<p>但最终系统不可能为每个 chunk 保留这么大的矩阵，所以代码对 token 维度求平均：</p>
+
+<pre><code>per_head = attn.mean(dim=(2, 3)).squeeze(0)</code></pre>
+
+<p><code>dim=(2, 3)</code> 分别是：</p>
+
+<pre><code>dim 2: query_len
+dim 3: chunk_len</code></pre>
+
+<p>所以这一步做的是：</p>
+
+<pre><code>对所有 query token × chunk token 的 affinity 求平均。</code></pre>
+
+<p>形状变化是：</p>
+
+<pre><code>(1, 32, query_len, chunk_len)
+-> (32,)</code></pre>
+
+<p>也就是：</p>
+
+<pre><code>这个 chunk 在 32 个 heads 上，各有一个分数。</code></pre>
+
+<div class="note">
+  <p><strong>注意：</strong>这里的平均是一种简化聚合方式。它把 token-level 矩阵压成 head-level 分数，方便后面按 chunk 排序。</p>
+</div>
+
+<hr>
+
+<h3 id="sec-9-9">9.9 多 layer 如何聚合</h3>
+
+<p>当前默认 scoring layers 是：</p>
+
+<pre><code>scoring_layers = [0, 8, 16, 24, num_model_layers - 1]</code></pre>
+
+<p>如果模型有 32 层，那么就是：</p>
+
+<pre><code>layer 0
+layer 8
+layer 16
+layer 24
+layer 31</code></pre>
+
+<p>每个 layer 都会对所有 candidates 算一遍 Q-K，得到：</p>
+
+<pre><code>(n_chunks, 32)</code></pre>
+
+<p>意思是：</p>
+
+<pre><code>每个 chunk 有 32 个 head 分数。</code></pre>
+
+<p>多层聚合代码是：</p>
+
+<pre><code>avg_scores = np.mean(all_scores, axis=0)</code></pre>
+
+<p>所以多个 layer 平均后，形状仍然是：</p>
+
+<pre><code>(n_chunks, 32)</code></pre>
+
+<p>这时的每个 head 分数已经是多个 layer 平均后的分数。</p>
+
+<pre><code>layer 0 head 0 分数
+layer 8 head 0 分数
+layer 16 head 0 分数
+layer 24 head 0 分数
+layer 31 head 0 分数
+
+平均后：
+这个 chunk 的 head 0 分数</code></pre>
+
+<hr>
+
+<h3 id="sec-9-10">9.10 chunk scalar 是什么</h3>
+
+<p><code>chunk scalar</code> 就是一个 chunk 最终用于排序的单个数字分数。</p>
+
+<p>前面得到的是：</p>
+
+<pre><code>一个 chunk -> 32 个 head 分数</code></pre>
+
+<p>但排序时通常需要一个数，所以要把这 32 个 head 分数聚合成一个 scalar。</p>
+
+<p>代码入口是：</p>
+
+<pre><code>def aggregate_qk_scores(scores_matrix, mode="mean", topk=4):</code></pre>
+
+<p>当前默认聚合方式是：</p>
+
+<pre><code>qk_aggregation = mean</code></pre>
+
+<p>也就是：</p>
+
+<pre><code>chunk scalar = 所有 head 分数的平均值</code></pre>
+
+<p>简化例子，假设只有 4 个 head：</p>
+
+<pre><code>chunk A head scores = [0.10, 0.30, 0.20, 0.40]
+chunk B head scores = [0.50, 0.10, 0.10, 0.20]
+
+chunk A scalar = (0.10 + 0.30 + 0.20 + 0.40) / 4 = 0.25
+chunk B scalar = (0.50 + 0.10 + 0.10 + 0.20) / 4 = 0.225</code></pre>
+
+<p>所以按 scalar 排序时，chunk A 排在 chunk B 前面。</p>
+
+<p>代码里还支持其他聚合方式：</p>
+
+<table>
+  <tr>
+    <th>mode</th>
+    <th>含义</th>
+  </tr>
+  <tr>
+    <td><code>mean</code></td>
+    <td>所有 head 分数平均</td>
+  </tr>
+  <tr>
+    <td><code>max</code></td>
+    <td>取最高 head 分数</td>
+  </tr>
+  <tr>
+    <td><code>topk_mean</code></td>
+    <td>取最高 k 个 head 分数再平均，默认 k=4</td>
+  </tr>
+</table>
+
+<p>当前主线最重要的是 <code>mean</code>。</p>
+
+<hr>
+
+<h3 id="sec-9-11">9.11 route_per_head=True 在做什么</h3>
+
+<p>当前主线配置里：</p>
+
+<pre><code>route_per_head = True</code></pre>
+
+<p>这表示最终选择 chunk 时，不只是简单按 scalar 排序。它会让每个 head 都先提名自己认为相关的 chunk。</p>
+
+<p>代码逻辑可以翻译成：</p>
+
+<pre><code>1. 对每个 head：
+     找出这个 head 评分最高的 top-k chunks。
+
+2. 把所有 head 提名出来的 chunks 做 union。
+
+3. 再用 chunk scalar 排序。
+
+4. 最终仍然只保留 effective_route_top_k 个 chunk。</code></pre>
+
+<p>为什么要这么做？因为不同 head 可能关注不同类型的证据。</p>
+
+<pre><code>head 0 可能更关注 speaker
+head 1 可能更关注 decision
+head 2 可能更关注 number
+head 3 可能更关注 topic word</code></pre>
+
+<p>如果只用平均分，有些只被少数 head 强烈关注的证据可能被平均掉。<code>route_per_head=True</code> 给每个 head 一个参与候选提名的机会。</p>
+
+<div class="note">
+  <p><strong>但它不是无限扩大传输量。</strong>最终仍然有硬上限：最多只保留 <code>effective_route_top_k</code> 个 chunk。</p>
+</div>
+
+<hr>
+
+<h3 id="sec-9-12">9.12 一个完整数字例子</h3>
+
+<p>假设第八章后剩下 4 个 candidate chunks：</p>
+
+<pre><code>chunk A
+chunk B
+chunk C
+chunk D</code></pre>
+
+<p>为了简单，假设只有 2 个 layer、3 个 head。</p>
+
+<p>Layer 0 算出来：</p>
+
+<pre><code>          head0  head1  head2
+chunk A   0.8    0.2    0.1
+chunk B   0.4    0.6    0.2
+chunk C   0.1    0.3    0.9
+chunk D   0.5    0.4    0.3</code></pre>
+
+<p>Layer 1 算出来：</p>
+
+<pre><code>          head0  head1  head2
+chunk A   0.6    0.3    0.2
+chunk B   0.5    0.7    0.3
+chunk C   0.2    0.2    0.8
+chunk D   0.4    0.5    0.4</code></pre>
+
+<p>先做 layer 平均：</p>
+
+<pre><code>chunk A:
+  [(0.8+0.6)/2, (0.2+0.3)/2, (0.1+0.2)/2]
+  = [0.7, 0.25, 0.15]
+
+chunk B:
+  [0.45, 0.65, 0.25]
+
+chunk C:
+  [0.15, 0.25, 0.85]
+
+chunk D:
+  [0.45, 0.45, 0.35]</code></pre>
+
+<p>再做 scalar mean：</p>
+
+<pre><code>chunk A scalar = (0.7 + 0.25 + 0.15) / 3 = 0.367
+chunk B scalar = (0.45 + 0.65 + 0.25) / 3 = 0.450
+chunk C scalar = (0.15 + 0.25 + 0.85) / 3 = 0.417
+chunk D scalar = (0.45 + 0.45 + 0.35) / 3 = 0.417</code></pre>
+
+<p>如果最后选 top 2，单纯 scalar 排序会选：</p>
+
+<pre><code>chunk B
+chunk C 或 chunk D</code></pre>
+
+<p>如果 <code>route_per_head=True</code>，每个 head 先提名 top 2：</p>
+
+<pre><code>head0 top2: chunk A, chunk B/D
+head1 top2: chunk B, chunk D
+head2 top2: chunk C, chunk D</code></pre>
+
+<p>union 后可能包含：</p>
+
+<pre><code>chunk A, chunk B, chunk C, chunk D</code></pre>
+
+<p>然后再按 scalar 排序截断 top 2：</p>
+
+<pre><code>chunk B
+chunk C 或 chunk D</code></pre>
+
+<p>这个例子说明：<code>route_per_head</code> 的作用是给不同 head 提名机会，但最终仍然受 scalar 排序和 top-k 上限控制。</p>
+
+<hr>
+
+<h3 id="sec-9-13">9.13 第九章最终输出是什么</h3>
+
+<p>第九章最终输出是：</p>
+
+<pre><code>selected_candidates</code></pre>
+
+<p>每个 selected candidate 里一般有：</p>
+
+<pre><code>candidate_id
+turn_idx
+local_chunk_idx
+topic_ids
+transfer_topic_id
+transfer_node_id
+start_t
+end_t
+n_tokens
+score
+prefilter_score</code></pre>
+
+<p>这些字段的作用是：</p>
+
+<table>
+  <tr>
+    <th>字段</th>
+    <th>含义</th>
+  </tr>
+  <tr>
+    <td><code>candidate_id</code></td>
+    <td>候选 chunk 的内部编号</td>
+  </tr>
+  <tr>
+    <td><code>turn_idx</code></td>
+    <td>这个 chunk 属于哪一个会议 turn</td>
+  </tr>
+  <tr>
+    <td><code>start_t / end_t</code></td>
+    <td>这个 chunk 在完整 prompt KV 里的 token 坐标</td>
+  </tr>
+  <tr>
+    <td><code>score</code></td>
+    <td>Q-K fine routing 得到的 chunk scalar 分数</td>
+  </tr>
+  <tr>
+    <td><code>prefilter_score</code></td>
+    <td>第八章 lexical prefilter 的便宜分数，不是最终 Q-K 分数</td>
+  </tr>
+  <tr>
+    <td><code>transfer_topic_id / transfer_node_id</code></td>
+    <td>后面计算 KV 传输成本、节点数、segment 数时使用</td>
+  </tr>
+</table>
+
+<p>第九章选出的这些 chunk，会进入后面的传输统计和答案生成评估。</p>
+
+<pre><code>selected_candidates
+-> transfer accounting
+-> selected KV fetch latency
+-> selected answer context
+-> selected_turn recall / answer F1 / TTFT saving</code></pre>
+
+<hr>
+
+<h3 id="sec-9-14">9.14 第八章和第九章的边界</h3>
+
+<p>第八章和第九章非常容易混在一起，所以这里再次分清楚。</p>
+
+<table>
+  <tr>
+    <th>章节</th>
+    <th>核心问题</th>
+    <th>主要对象</th>
+  </tr>
+  <tr>
+    <td>第八章</td>
+    <td>哪些 chunk 有资格进入 Q-K？Q-K 怎么执行得更快？</td>
+    <td>candidate pool, prefilter, dynamic pool, segment gate, cache, batching</td>
+  </tr>
+  <tr>
+    <td>第九章</td>
+    <td>进入 Q-K 的 chunk 到底怎么打分、聚合、排序？</td>
+    <td>Q, K, QK^T, affinity, layer/head aggregation, chunk scalar</td>
+  </tr>
+</table>
+
+<p>一句话：</p>
+
+<pre><code>第八章决定谁能进考场；
+第九章给进考场的 chunk 真正打分排名。</code></pre>
+
+<hr>
+
+<h3 id="sec-9-15">9.15 给老师汇报的版本</h3>
+
+<p>可以这样讲：</p>
+
+<pre><code>在细路由阶段，我不是用外部 embedding retrieval 给 chunk 排序，
+而是复用 LLM 自己 attention 机制里的 Q-K affinity。
+
+具体来说，query 侧经过模型对应层的 q_proj 得到 Q，
+历史 chunk 侧直接使用 prefill 阶段已经缓存下来的 K。
+然后对每个 candidate chunk 计算 QK^T / sqrt(d)，
+得到 query tokens 和 chunk tokens 之间的 attention affinity。
+
+这些 token-level affinity 会先在 query token 和 chunk token 维度上平均，
+得到每个 head 一个分数；
+再跨多个 scoring layers 平均；
+最后把 head 分数聚合成一个 chunk scalar。
+
+系统根据这些 Q-K scalar 分数选择 top chunks，
+这些 chunks 对应的 KV 会被传输，用于后续 decode 或答案生成。</code></pre>
+
+<p>最后一句边界：</p>
+
+<pre><code>第九章的贡献不是重新训练模型，而是把模型内部 Q-K attention 空间作为 routing signal，
+用它在 selected topic 内对 candidate chunks 做 fine-grained KV selection。</code></pre>
+
+</body>
+</html>

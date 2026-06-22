@@ -1,0 +1,686 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>第 3 章：Q-K attention 原理</title>
+<style>
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+  color: #1f2933;
+  line-height: 1.75;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 40px 28px 80px;
+  background: #ffffff;
+}
+h1 {
+  font-size: 30px;
+  margin: 0 0 24px;
+  border-bottom: 2px solid #d8dee9;
+  padding-bottom: 14px;
+}
+h2 {
+  font-size: 22px;
+  margin-top: 38px;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 8px;
+}
+h3 {
+  font-size: 18px;
+  margin-top: 28px;
+  color: #243b53;
+}
+p { margin: 12px 0; }
+code {
+  font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  background: #f3f4f6;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+pre {
+  background: #0f172a;
+  color: #e5e7eb;
+  padding: 14px 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.toc {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 24px 0 34px;
+}
+.toc h2 {
+  margin-top: 0;
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.toc ol { margin: 0; padding-left: 22px; }
+.toc li { margin: 4px 0; }
+hr {
+  border: 0;
+  border-top: 1px solid #e5e7eb;
+  margin: 28px 0;
+}
+a { color: #2563eb; text-decoration: none; }
+</style>
+</head>
+<body>
+<h2>第 3 章：Q-K attention 原理</h2>
+
+<div class="toc">
+<h2>目录</h2>
+<ol>
+  <li><a href="#sec-3-0">3.0 先抓住一句话</a></li>
+  <li><a href="#sec-3-1">3.1 一个 query token 对一个历史 token</a></li>
+  <li><a href="#sec-3-2">3.2 多个 query tokens 和多个 chunk tokens</a></li>
+  <li><a href="#sec-3-3">3.3 affinity 分数到底是什么</a></li>
+  <li><a href="#sec-3-4">3.4 加入 head</a></li>
+  <li><a href="#sec-3-5">3.5 一个 head 的矩阵怎么变成一个分数</a></li>
+  <li><a href="#sec-3-6">3.6 加入 layer</a></li>
+  <li><a href="#sec-3-7">3.7 chunk scalar 是什么</a></li>
+  <li><a href="#sec-3-8">3.8 从 query 到 chunk score 的完整过程</a></li>
+  <li><a href="#sec-3-9">3.9 这在你的工程里放在哪里</a></li>
+  <li><a href="#sec-3-10">3.10 代码和公式的最短对应</a></li>
+  <li><a href="#sec-3-11">3.11 和普通 retrieval 的区别</a></li>
+  <li><a href="#sec-3-12">3.12 用一句话给老师讲</a></li>
+  <li><a href="#sec-3-13">3.13 本章核心链条</a></li>
+</ol>
+</div>
+
+<h3 id="sec-3-0">3.0 先抓住一句话</h3>
+
+<p>这一章只讲一件事：</p>
+
+<pre><code>为什么 query 的 Q 可以拿来给历史 chunk 的 K 打分？</code></pre>
+
+<p>先不要急着想公式。最直觉的理解是：</p>
+
+<pre><code>query 的 Q：表示当前问题“我想找什么”。
+历史 chunk 的 K：表示历史内容“我这里有什么，可以被别人匹配”。
+Q 和 K 越对得上，说明模型越可能关注这段历史。</code></pre>
+
+<p>所以你的工程里做的事情不是凭空发明一个相关性分数，而是借用了 Transformer 模型本来就会用的 attention 匹配机制。</p>
+
+<p>换成一句更像论文里的话：</p>
+
+<pre><code>We use model-internal Q-K attention affinity as a fine-grained signal
+for estimating how useful a cached KV chunk is for the current query.</code></pre>
+
+<p>中文意思是：</p>
+
+<pre><code>我们用模型内部的 Q-K 注意力匹配强度，
+估计某个历史 KV chunk 对当前 query 有没有用。</code></pre>
+
+<hr>
+
+<h3 id="sec-3-1">3.1 一个 query token 对一个历史 token</h3>
+
+<p>先从最小单位开始。</p>
+
+<p>假设用户问：</p>
+
+<pre><code>What colour is the remote?</code></pre>
+
+<p>里面有一个重要 token：</p>
+
+<pre><code>colour</code></pre>
+
+<p>历史会议里某个 chunk 里有一句话：</p>
+
+<pre><code>The remote should be red.</code></pre>
+
+<p>里面有一个重要 token：</p>
+
+<pre><code>red</code></pre>
+
+<p>在模型某一层里，<code>colour</code> 这个 query token 会被投影成一个 Q 向量，<code>red</code> 这个历史 token 会被投影成一个 K 向量。</p>
+
+<p>先用 2 维玩具例子理解。真实工程里不是 2 维，而是 128 维。</p>
+
+<pre><code>Q_colour = [1, 2]
+K_red    = [2, 1]</code></pre>
+
+<p>它们的匹配分数用点积算：</p>
+
+<pre><code>Q_colour · K_red
+= 1*2 + 2*1
+= 4</code></pre>
+
+<p>再假设另一个历史 token 完全不相关：</p>
+
+<pre><code>K_random = [-1, 0]</code></pre>
+
+<p>那么：</p>
+
+<pre><code>Q_colour · K_random
+= 1*(-1) + 2*0
+= -1</code></pre>
+
+<p>于是模型会觉得：</p>
+
+<pre><code>colour 和 red 的匹配程度更高；
+colour 和 random 的匹配程度更低。</code></pre>
+
+<p>这就是 Q-K attention 的最小单位：</p>
+
+<pre><code>一个 query token 的 Q
+和
+一个历史 token 的 K
+做匹配。</code></pre>
+
+<p>这里的“匹配”不是文本字符串匹配，不是看到 colour 和 red 两个词表面像不像，而是在模型内部向量空间里看它们是否对齐。</p>
+
+<hr>
+
+<h3 id="sec-3-2">3.2 多个 query tokens 和多个 chunk tokens</h3>
+
+<p>真实 query 不只有一个 token，真实 chunk 也不只有一个 token。</p>
+
+<p>假设 query 有 3 个 token：</p>
+
+<pre><code>query tokens:
+q0 = What
+q1 = colour
+q2 = remote</code></pre>
+
+<p>某个历史 chunk 有 4 个 token：</p>
+
+<pre><code>chunk tokens:
+k0 = remote
+k1 = should
+k2 = be
+k3 = red</code></pre>
+
+<p>那么每个 query token 都可以和每个 chunk token 做一次 Q-K 匹配。</p>
+
+<p>结果就是一个矩阵：</p>
+
+<pre><code>              chunk tokens
+              k0      k1      k2      k3
+            remote  should   be      red
+
+q0 What      0.2     0.1     0.0     0.1
+q1 colour    0.4     0.1     0.0     2.8
+q2 remote    2.5     0.3     0.1     0.6</code></pre>
+
+<p>这张表里的每一个数字，都是一个 token-to-token 的 affinity 分数。</p>
+
+<p>比如：</p>
+
+<pre><code>q1 colour 对 k3 red 的分数是 2.8</code></pre>
+
+<p>可以理解成：</p>
+
+<pre><code>在这个 attention 空间里，
+query 里的 colour 比较想看历史里的 red。</code></pre>
+
+<p>再比如：</p>
+
+<pre><code>q2 remote 对 k0 remote 的分数是 2.5</code></pre>
+
+<p>可以理解成：</p>
+
+<pre><code>query 里的 remote 比较想看历史里的 remote。</code></pre>
+
+<p>这正对应代码里的矩阵乘法：</p>
+
+<pre><code>attn = torch.matmul(Q, K_layer.transpose(-2, -1)) / scale</code></pre>
+
+<p>数学公式就是：</p>
+
+<pre><code>attention score = QK^T / sqrt(d)</code></pre>
+
+<p>其中：</p>
+
+<pre><code>Q: query token 的向量集合
+K: chunk token 的向量集合
+K^T: 把 K 转置，方便每个 Q 和每个 K 做点积
+sqrt(d): 缩放项，防止分数因为维度太大而过大</code></pre>
+
+<hr>
+
+<h3 id="sec-3-3">3.3 affinity 分数到底是什么</h3>
+
+<p><code>affinity</code> 可以翻译成：</p>
+
+<pre><code>匹配强度
+吸引程度
+对齐程度</code></pre>
+
+<p>在你的工程里，它不是一个额外训练出来的分类器分数，也不是 BM25 分数，也不是 embedding cosine similarity。</p>
+
+<p>它就是：</p>
+
+<pre><code>模型某一层、某一个 head 里，
+query token 的 Q 和历史 token 的 K 做点积之后得到的 attention score。</code></pre>
+
+<p>所以 affinity 分数回答的是：</p>
+
+<pre><code>如果模型真的可以看到这段历史，
+它自己的 attention 机制会不会倾向于关注这里？</code></pre>
+
+<p>分数越高，表示：</p>
+
+<pre><code>query 的需求和这个历史 token 的 key 更对齐。</code></pre>
+
+<p>分数越低，表示：</p>
+
+<pre><code>query 不太会在这个 attention 空间里关注它。</code></pre>
+
+<p>注意，这里还只是 token 对 token 的分数，不是 chunk 的最终分数。后面还要把很多 token-to-token 分数聚合起来，才能得到一个 chunk 的分数。</p>
+
+<hr>
+
+<h3 id="sec-3-4">3.4 加入 head</h3>
+
+<p>Transformer 里不是只有一个 attention head，而是多个 head。</p>
+
+<p>你现在用的 Mistral 类模型大概是：</p>
+
+<pre><code>hidden_size = 4096
+num_attention_heads = 32
+num_key_value_heads = 8
+head_dim = 128</code></pre>
+
+<p>这几个参数先这样理解：</p>
+
+<pre><code>hidden_size = 4096
+表示每个 token 在模型内部总共有 4096 维表示。
+
+num_attention_heads = 32
+表示模型把 attention 分成 32 个视角来看。
+
+head_dim = 128
+表示每个 attention head 使用 128 维。</code></pre>
+
+<p>为什么 <code>head_dim = 128</code>？因为：</p>
+
+<pre><code>4096 / 32 = 128</code></pre>
+
+<p>也就是说，4096 维不是一个 head 全部吃掉，而是拆成 32 个 head，每个 head 看 128 维。</p>
+
+<p>可以把 32 个 head 理解成 32 种不同的“看相关性”的视角。比如只是帮助理解，不是模型里真的有人工命名：</p>
+
+<pre><code>head 0 可能更关注实体词：remote, button, battery
+head 1 可能更关注颜色：red, blue, grey
+head 2 可能更关注动作：change, decide, propose
+head 3 可能更关注指代关系：it, this, that
+...</code></pre>
+
+<p>所以同一个 query 和同一个 chunk，在不同 head 里可能得到不同分数。</p>
+
+<p>代码里的形状是：</p>
+
+<pre><code>Q: (1, 32, query_len, 128)
+K: (1, 32, chunk_len, 128)</code></pre>
+
+<p>做完 QK^T 后：</p>
+
+<pre><code>attn: (1, 32, query_len, chunk_len)</code></pre>
+
+<p>这表示：</p>
+
+<pre><code>1 个 batch，
+32 个 heads，
+每个 head 里都有 query_len × chunk_len 张 token 匹配表。</code></pre>
+
+<hr>
+
+<h3 id="sec-3-5">3.5 一个 head 的矩阵怎么变成一个分数</h3>
+
+<p>现在看一个 head。假设某个 head 里算出来的矩阵是：</p>
+
+<pre><code>              chunk tokens
+              remote  should   be     red
+
+What          0.2     0.1     0.0    0.1
+colour        0.4     0.1     0.0    2.8
+remote        2.5     0.3     0.1    0.6</code></pre>
+
+<p>这个矩阵里有：</p>
+
+<pre><code>query_len * chunk_len = 3 * 4 = 12 个分数</code></pre>
+
+<p>但是我们最终要判断的是：</p>
+
+<pre><code>这个 chunk 对 query 整体有没有用？</code></pre>
+
+<p>所以代码先把一个 head 里的所有 token-to-token 分数做平均：</p>
+
+<pre><code>per_head = attn.mean(dim=(2, 3)).squeeze(0)</code></pre>
+
+<p>这里的 <code>dim=(2, 3)</code> 对应：</p>
+
+<pre><code>dim 2 = query_len
+dim 3 = chunk_len</code></pre>
+
+<p>也就是说：</p>
+
+<pre><code>把 query token 维度平均掉，
+把 chunk token 维度平均掉。</code></pre>
+
+<p>于是每个 head 从一张矩阵变成一个数字。</p>
+
+<p>如果有 32 个 heads，就得到：</p>
+
+<pre><code>per_head: (32,)</code></pre>
+
+<p>也就是：</p>
+
+<pre><code>这个 chunk 在 32 个 attention 视角下，各自有一个分数。</code></pre>
+
+<hr>
+
+<h3 id="sec-3-6">3.6 加入 layer</h3>
+
+<p>上面讲的是某一层里的 Q-K 分数。但 Transformer 有很多层。不同层学到的东西不一样。</p>
+
+<p>可以粗略理解成：</p>
+
+<pre><code>浅层：更偏词形、局部搭配、表面模式；
+中层：更偏短语、实体、关系；
+深层：更偏任务、语义、回答需要的信息。</code></pre>
+
+<p>所以你的工程不会只相信某一层，而是可以选多个层来算 Q-K。</p>
+
+<p>比如配置可能是：</p>
+
+<pre><code>qk_layers = [0, 8, 16, 24, last_layer]</code></pre>
+
+<p>每一层都会得到一个结果。如果有 <code>num_chunks</code> 个候选 chunk，那么某一层输出可以理解成：</p>
+
+<pre><code>scores_this_layer: (num_chunks, 32)</code></pre>
+
+<p>意思是：</p>
+
+<pre><code>每个 chunk，
+每个 head，
+都有一个分数。</code></pre>
+
+<p>多层之后，代码会把多层结果聚合起来。聚合后的形状仍然可以理解为：</p>
+
+<pre><code>scores_after_layers: (num_chunks, 32)</code></pre>
+
+<p>也就是说：</p>
+
+<pre><code>层的信息被平均或融合了，
+但每个 chunk 仍然保留 32 个 head 分数。</code></pre>
+
+<hr>
+
+<h3 id="sec-3-7">3.7 chunk scalar 是什么</h3>
+
+<p><code>chunk scalar</code> 听起来专业，其实它只是：</p>
+
+<pre><code>一个 chunk 最终得到的一个普通数字。</code></pre>
+
+<p><code>scalar</code> 的意思就是单个数，不是向量、不是矩阵。</p>
+
+<p>比如：</p>
+
+<pre><code>chunk A score = 0.83
+chunk B score = 0.41
+chunk C score = 1.27</code></pre>
+
+<p>这里的 <code>0.83</code>、<code>0.41</code>、<code>1.27</code> 就是 chunk scalar。</p>
+
+<p>为什么需要它？因为系统最后要排序：</p>
+
+<pre><code>哪个 chunk 分数最高？
+哪个 chunk 应该被 fetch？</code></pre>
+
+<p>排序必须用一个最终数字。但是在前面，我们对一个 chunk 其实还有 32 个 head 分数：</p>
+
+<pre><code>chunk A: [0.2, 0.5, 1.1, ..., 0.7]   共 32 个数</code></pre>
+
+<p>所以还要把 32 个 head 分数聚合成一个数字。代码里对应的是：</p>
+
+<pre><code>chunk_scores = aggregate_qk_scores(scores, qk_aggregation, qk_topk)</code></pre>
+
+<p>常见聚合方式可以这样理解：</p>
+
+<pre><code>mean:
+把 32 个 head 全部平均。
+适合认为所有 head 都有贡献。
+
+max:
+只看最高的那个 head。
+适合认为只要某个 head 强烈认为相关，就值得选。
+
+topk_mean:
+取最高的几个 head 再平均。
+适合避免单个 head 太偶然，同时保留强信号。</code></pre>
+
+<p>最终得到：</p>
+
+<pre><code>每个 chunk 一个 scalar score。</code></pre>
+
+<hr>
+
+<h3 id="sec-3-8">3.8 从 query 到 chunk score 的完整过程</h3>
+
+<p>现在把整条链路串起来。</p>
+
+<p>第一步，query 文本进 tokenizer：</p>
+
+<pre><code>What colour is the remote?</code></pre>
+
+<p>变成 token ids：</p>
+
+<pre><code>[What, colour, is, the, remote, ?]</code></pre>
+
+<p>第二步，query tokens 进入模型，拿到某一层 hidden states：</p>
+
+<pre><code>hidden = outputs.hidden_states[layer_idx]</code></pre>
+
+<p>第三步，用模型自己的 <code>q_proj</code> 把 hidden 投影成 Q：</p>
+
+<pre><code>Q = q_proj(hidden)</code></pre>
+
+<p>第四步，把 Q reshape 成多 head 形状：</p>
+
+<pre><code>Q = Q.view(1, -1, num_heads, head_dim).transpose(1, 2)</code></pre>
+
+<p>形状变成：</p>
+
+<pre><code>Q: (1, 32, query_len, 128)</code></pre>
+
+<p>第五步，历史 meeting 在 prefill 时已经产生了 KV cache。每个 chunk 对应一段历史 token 的 K：</p>
+
+<pre><code>K_layer: (1, 32, chunk_len, 128)</code></pre>
+
+<p>第六步，做 QK^T：</p>
+
+<pre><code>attn = torch.matmul(Q, K_layer.transpose(-2, -1)) / scale</code></pre>
+
+<p>得到：</p>
+
+<pre><code>attn: (1, 32, query_len, chunk_len)</code></pre>
+
+<p>第七步，在每个 head 内，把 token-to-token 分数平均：</p>
+
+<pre><code>per_head = attn.mean(dim=(2, 3)).squeeze(0)</code></pre>
+
+<p>得到：</p>
+
+<pre><code>per_head: (32,)</code></pre>
+
+<p>第八步，如果有多个 layer，就把多个 layer 的结果融合。</p>
+
+<p>第九步，把 32 个 head 分数聚合成一个 chunk scalar。</p>
+
+<p>第十步，对所有候选 chunks 排序，选 top-k：</p>
+
+<pre><code>chunk C: 1.27  -> selected
+chunk A: 0.83  -> selected
+chunk B: 0.41  -> not selected</code></pre>
+
+<p>这就是你的 fine routing。</p>
+
+<hr>
+
+<h3 id="sec-3-9">3.9 这在你的工程里放在哪里</h3>
+
+<p>这一点很重要。你的工程不是一上来就对所有 chunk 做 Q-K。</p>
+
+<p>当前主线是两级路由：</p>
+
+<pre><code>第一级：coarse routing
+用 lexical / BM25 在 topic 层面先选 topic。
+
+第二级：fine routing
+进入选中的 topic 之后，用 Q-K attention affinity 给 topic 内 chunk 打分。</code></pre>
+
+<p>也就是说，Q-K 现在主要负责：</p>
+
+<pre><code>topic 内部的 chunk 选择。</code></pre>
+
+<p>它不是负责：</p>
+
+<pre><code>从全局所有 topic 中直接发现主题。</code></pre>
+
+<p>原因是：</p>
+
+<pre><code>全局所有 chunk 都做 Q-K 计算会更贵；
+粗粒度 topic 选择可以先缩小候选范围；
+Q-K 更适合在较小候选集合里做细粒度判断。</code></pre>
+
+<p>所以你给老师讲时可以说：</p>
+
+<pre><code>我们先用轻量 lexical routing 定位可能相关的 topic nodes，
+再在这些 topic 内部使用 model-internal Q-K affinity 对 KV chunks 做精排。</code></pre>
+
+<hr>
+
+<h3 id="sec-3-10">3.10 代码和公式的最短对应</h3>
+
+<p>你可以把代码和公式这样对上。</p>
+
+<p>代码：</p>
+
+<pre><code>hidden = outputs.hidden_states[layer_idx]
+Q = q_proj(hidden)
+Q = Q.view(1, -1, num_heads, head_dim).transpose(1, 2)
+attn = torch.matmul(Q, K_layer.transpose(-2, -1)) / scale
+per_head = attn.mean(dim=(2, 3)).squeeze(0)</code></pre>
+
+<p>对应公式和含义：</p>
+
+<pre><code>hidden = 模型某层对 query token 的内部表示
+Q = hidden W_Q
+K = 历史 chunk 在 KV cache 里的 key
+attn = QK^T / sqrt(d)
+per_head = 对 query tokens 和 chunk tokens 的分数求平均</code></pre>
+
+<p>对应维度：</p>
+
+<pre><code>hidden_size = 4096
+num_attention_heads = 32
+head_dim = 128
+
+Q:    (1, 32, query_len, 128)
+K:    (1, 32, chunk_len, 128)
+attn: (1, 32, query_len, chunk_len)</code></pre>
+
+<p>这里还有一个容易困惑的点：</p>
+
+<pre><code>num_key_value_heads = 8
+num_attention_heads = 32</code></pre>
+
+<p>这说明模型用了 GQA，也就是 grouped-query attention。</p>
+
+<p>简单理解：</p>
+
+<pre><code>Q 有 32 个 heads；
+K/V 原始只有 8 个 heads；
+实际计算时 K/V 会扩展或重复到 32 个 query heads 对齐。</code></pre>
+
+<p>所以你最后在代码里看到的 Q 和 K 都可以对齐成：</p>
+
+<pre><code>32 heads × 128 dim</code></pre>
+
+<hr>
+
+<h3 id="sec-3-11">3.11 和普通 retrieval 的区别</h3>
+
+<p>普通 retrieval 通常是：</p>
+
+<pre><code>query text -> 外部 embedding model -> query embedding
+chunk text -> 外部 embedding model -> chunk embedding
+比较 query embedding 和 chunk embedding 的相似度</code></pre>
+
+<p>比如：</p>
+
+<pre><code>cosine(query_embedding, chunk_embedding)</code></pre>
+
+<p>这种方法的语义空间来自外部检索器。</p>
+
+<p>你的 Q-K routing 是：</p>
+
+<pre><code>query text -> 当前 LLM 某层里的 Q
+历史 chunk -> 当前 LLM KV cache 里的 K
+比较 Q 和 K 的 attention affinity</code></pre>
+
+<p>也就是说，你用的是：</p>
+
+<pre><code>LLM 自己的 attention 空间。</code></pre>
+
+<p>区别可以这样记：</p>
+
+<pre><code>普通 retrieval 问：
+外部检索器觉得 query 和 chunk 像不像？
+
+Q-K routing 问：
+如果当前 LLM 要回答这个 query，
+它自己的 attention 会不会想看这个 chunk？</code></pre>
+
+<p>这就是你方法里比较有研究味道的地方。</p>
+
+<hr>
+
+<h3 id="sec-3-12">3.12 用一句话给老师讲</h3>
+
+<p>如果老师问你 Q-K routing 到底是什么，你可以这样说：</p>
+
+<pre><code>我不是用外部 embedding 判断 chunk 相关性，
+而是用模型自己 attention 层里的 Q-K 匹配关系。
+query 的 Q 表示它想找什么，
+历史 chunk 的 K 表示它能被怎么匹配。
+两者越匹配，说明模型越可能关注这个 chunk，
+所以这个 chunk 越应该被 fetch。</code></pre>
+
+<p>更口语一点：</p>
+
+<pre><code>我们不是在模型外面猜哪段文本相关，
+而是在问模型自己的 attention：
+如果你要回答这个问题，你会想看哪段历史 KV？</code></pre>
+
+<hr>
+
+<h3 id="sec-3-13">3.13 本章核心链条</h3>
+
+<p>这一章最后只需要记住这条链：</p>
+
+<pre><code>Q/K token 向量
+-> token-to-token affinity
+-> 一个 head 的 query_len × chunk_len 矩阵
+-> 32 个 heads 的 per-head 分数
+-> 多层聚合
+-> head 聚合成 chunk scalar
+-> 排序选择 top-k chunks</code></pre>
+
+<p>对应你的工程位置是：</p>
+
+<pre><code>coarse routing 先选 topic，
+fine routing 再用 Q-K 在 topic 内选 chunk。</code></pre>
+
+</body>
+</html>
