@@ -110,6 +110,10 @@ def main(args):
     print(f"  route_top_k: {args.route_top_k}")
     print(f"  route_per_head: {args.route_per_head}")
     print(f"  route_neighbor_expand: {args.route_neighbor_expand}")
+    print(f"  route_selection_mode: {args.route_selection_mode}")
+    print(f"  turn_rerank_qk_weight: {args.turn_rerank_qk_weight}")
+    print(f"  turn_rerank_lexical_weight: {args.turn_rerank_lexical_weight}")
+    print(f"  turn_rerank_head_vote_weight: {args.turn_rerank_head_vote_weight}")
     print(f"  route_candidate_prefilter: {args.route_candidate_prefilter}")
     print(f"  route_candidate_prefilter_factor: {args.route_candidate_prefilter_factor}")
     print(f"  route_candidate_prefilter_min_keep: {args.route_candidate_prefilter_min_keep}")
@@ -1188,6 +1192,10 @@ def main(args):
                         "qk_score_batch_size": args.qk_score_batch_size,
                         "cache_candidate_keys": bool(args.cache_candidate_keys),
                         "cache_query_q": bool(args.cache_query_q),
+                        "route_selection_mode": args.route_selection_mode,
+                        "turn_rerank_qk_weight": args.turn_rerank_qk_weight,
+                        "turn_rerank_lexical_weight": args.turn_rerank_lexical_weight,
+                        "turn_rerank_head_vote_weight": args.turn_rerank_head_vote_weight,
                         "dynamic_route_budget": bool(args.dynamic_route_budget),
                         "dynamic_candidate_pool_budget": bool(
                             args.dynamic_candidate_pool_budget
@@ -1359,6 +1367,10 @@ def main(args):
                     f"  selected topics: {qk_route_info['selected_topic_ids']}, "
                     f"chunks={qk_route_info['num_selected_candidates']}/"
                     f"{qk_route_info['num_candidates_after_topic_filter']}"
+                )
+                print(
+                    "  route selection: "
+                    f"{qk_route_info.get('route_selection_mode', 'chunk_topk')}"
                 )
                 print(
                     "  candidate prefilter: "
@@ -1542,6 +1554,10 @@ def main(args):
                         "cachegen_segment_count_mode": args.cachegen_segment_count_mode,
                         "route_per_head": args.route_per_head,
                         "route_neighbor_expand": args.route_neighbor_expand,
+                        "route_selection_mode": args.route_selection_mode,
+                        "turn_rerank_qk_weight": args.turn_rerank_qk_weight,
+                        "turn_rerank_lexical_weight": args.turn_rerank_lexical_weight,
+                        "turn_rerank_head_vote_weight": args.turn_rerank_head_vote_weight,
                         "qk_aggregation": args.qk_aggregation,
                         "qk_topk": args.qk_topk,
                         "max_queries_per_doc": args.max_queries_per_doc,
@@ -1694,6 +1710,15 @@ def build_arg_parser():
                         help="是否逐 head 独立选 chunk（Quest 风格，取并集）")
     parser.add_argument("--route_neighbor_expand", type=int, default=0,
                         help="选中 chunk 的邻居扩展数，0=不扩展")
+    parser.add_argument("--route_selection_mode", type=str, default="chunk_topk",
+                        choices=["chunk_topk", "turn_rerank"],
+                        help="final evidence selector after exact Q-K scoring")
+    parser.add_argument("--turn_rerank_qk_weight", type=float, default=0.65,
+                        help="turn_rerank weight for normalized turn Q-K score")
+    parser.add_argument("--turn_rerank_lexical_weight", type=float, default=0.25,
+                        help="turn_rerank weight for query-token overlap")
+    parser.add_argument("--turn_rerank_head_vote_weight", type=float, default=0.10,
+                        help="turn_rerank weight for per-head top-k vote ratio")
     parser.add_argument("--route_candidate_prefilter", type=str, default="none",
                         choices=["none", "lexical"],
                         help="Q-K rerank 前是否先做快速候选召回")

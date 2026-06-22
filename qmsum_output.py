@@ -155,6 +155,7 @@ def write_case_summary_tsv(results, out_path):
         "survival_qk_selected_turn_recall",
         "query_budget_type",
         "effective_route_top_k",
+        "route_selection_mode",
         "candidate_prefilter_mode",
         "candidate_prefilter_pool_size",
         "candidate_prefilter_requested_pool_size",
@@ -293,6 +294,7 @@ def write_case_summary_tsv(results, out_path):
                 f"{_as_float(survival.get('qk_selected_turn_recall')):.4f}",
                 str(qk_route_info.get("query_budget_type", "")),
                 str(qk_route_info.get("effective_route_top_k", "")),
+                str(qk_route_info.get("route_selection_mode", "chunk_topk")),
                 str(prefilter_fields.get("mode", "")),
                 str(prefilter_fields.get("pool_size", "")),
                 str(prefilter_fields.get("requested_pool_size", "")),
@@ -493,6 +495,8 @@ def write_case_answer_log(results, out_path):
                 ),
                 "query_budget_type": qk_route_info.get("query_budget_type"),
                 "effective_route_top_k": qk_route_info.get("effective_route_top_k"),
+                "route_selection_mode": qk_route_info.get("route_selection_mode"),
+                "route_selection_debug": qk_route_info.get("route_selection_debug", {}),
                 "candidate_prefilter_mode": qk_route_info.get("candidate_prefilter_mode"),
                 "candidate_prefilter_pool_size": qk_route_info.get(
                     "candidate_prefilter_pool_size"

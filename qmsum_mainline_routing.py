@@ -224,6 +224,230 @@ def candidate_turns_in_order(candidates):
     return ordered_turns
 
 
+def get_turn_text(transcripts, turn_idx):
+    if 0 <= int(turn_idx) < len(transcripts):
+        turn = transcripts[int(turn_idx)]
+        speaker = turn.get("speaker", "").strip() or "Speaker"
+        content = turn.get("content", "").strip()
+        return speaker, f"{speaker}: {content}"
+    return "Speaker", ""
+
+
+def normalize_numeric_map(raw_values):
+    finite_values = [
+        float(value)
+        for value in raw_values.values()
+        if np.isfinite(float(value)) and float(value) > -1e8
+    ]
+    if not finite_values:
+        return {int(key): 0.0 for key in raw_values}
+
+    lo = min(finite_values)
+    hi = max(finite_values)
+    span = max(hi - lo, 1e-6)
+    normalized = {}
+    for key, value in raw_values.items():
+        value = float(value)
+        if not np.isfinite(value) or value <= -1e8:
+            normalized[int(key)] = 0.0
+        else:
+            normalized[int(key)] = float((value - lo) / span)
+    return normalized
+
+
+def compute_candidate_head_vote_scores(per_head_scores, top_k):
+    if not per_head_scores:
+        return {}
+
+    score_matrix = np.stack(per_head_scores, axis=0)
+    num_candidates, num_heads = score_matrix.shape
+    if num_candidates <= 0 or num_heads <= 0:
+        return {}
+
+    k = min(max(1, int(top_k)), num_candidates)
+    vote_counts = np.zeros(num_candidates, dtype=np.float32)
+    for head_idx in range(num_heads):
+        top_local = np.argsort(score_matrix[:, head_idx])[-k:]
+        vote_counts[top_local] += 1.0
+
+    denom = max(1.0, float(num_heads))
+    return {
+        int(local_idx): float(vote_counts[local_idx] / denom)
+        for local_idx in range(num_candidates)
+    }
+
+
+def select_candidates_chunk_topk(
+    scored_candidates,
+    per_head_scores,
+    effective_route_top_k,
+    use_per_head,
+):
+    if not scored_candidates:
+        return [], {}
+
+    k = min(int(effective_route_top_k), len(scored_candidates))
+    debug = {"selection_mode": "chunk_topk", "target_k": int(k)}
+    if use_per_head and per_head_scores:
+        score_matrix = np.stack(per_head_scores, axis=0)
+        selected_local_ids = set()
+        for head_idx in range(score_matrix.shape[1]):
+            top_local = np.argsort(score_matrix[:, head_idx])[-k:]
+            selected_local_ids.update(int(i) for i in top_local)
+        selected_candidates = [scored_candidates[i] for i in selected_local_ids]
+        selected_candidates = sorted(
+            selected_candidates,
+            key=lambda x: -float(x["score"]),
+        )[:k]
+        debug["per_head_candidate_pool"] = int(len(selected_local_ids))
+    else:
+        selected_candidates = sorted(
+            scored_candidates,
+            key=lambda x: -float(x["score"]),
+        )[:k]
+    return selected_candidates, debug
+
+
+def select_candidates_turn_rerank(
+    scored_candidates,
+    per_head_scores,
+    candidate_prefilter_scores,
+    transcripts,
+    query_text,
+    effective_route_top_k,
+    args,
+):
+    if not scored_candidates:
+        return [], {"selection_mode": "turn_rerank", "target_k": 0}
+
+    target_k = min(int(effective_route_top_k), len(scored_candidates))
+    query_tokens = set(tokenize_lexical_text(query_text))
+
+    head_vote_by_local = compute_candidate_head_vote_scores(
+        per_head_scores,
+        target_k,
+    )
+    qk_by_turn = {}
+    prefilter_by_turn = {}
+    by_turn = defaultdict(list)
+    for local_idx, cand in enumerate(scored_candidates):
+        turn_idx = int(cand["turn_idx"])
+        by_turn[turn_idx].append((local_idx, cand))
+        qk_by_turn[turn_idx] = max(
+            float(qk_by_turn.get(turn_idx, -1e9)),
+            float(cand.get("score", 0.0)),
+        )
+        prefilter_by_turn[turn_idx] = max(
+            float(prefilter_by_turn.get(turn_idx, -1e9)),
+            float(candidate_prefilter_scores.get(int(cand["candidate_id"]), -1e9)),
+        )
+
+    normalized_qk = normalize_numeric_map(qk_by_turn)
+    normalized_prefilter = normalize_numeric_map(prefilter_by_turn)
+    qk_weight = float(getattr(args, "turn_rerank_qk_weight", 0.65))
+    lexical_weight = float(getattr(args, "turn_rerank_lexical_weight", 0.25))
+    head_vote_weight = float(getattr(args, "turn_rerank_head_vote_weight", 0.10))
+
+    turn_records = []
+    for turn_idx, indexed_cands in by_turn.items():
+        speaker, turn_text = get_turn_text(transcripts, turn_idx)
+        turn_tokens = set(tokenize_lexical_text(turn_text))
+        lexical_overlap = 0.0
+        if query_tokens:
+            lexical_overlap = float(len(query_tokens & turn_tokens)) / float(
+                len(query_tokens)
+            )
+        max_head_vote = max(
+            float(head_vote_by_local.get(int(local_idx), 0.0))
+            for local_idx, _ in indexed_cands
+        )
+        best_local_idx, best_candidate = sorted(
+            indexed_cands,
+            key=lambda item: (
+                -float(item[1].get("score", 0.0)),
+                -float(head_vote_by_local.get(int(item[0]), 0.0)),
+                int(item[1]["start_t"]),
+                int(item[1]["candidate_id"]),
+            ),
+        )[0]
+        turn_score = (
+            qk_weight * float(normalized_qk.get(int(turn_idx), 0.0))
+            + lexical_weight * float(lexical_overlap)
+            + head_vote_weight * float(max_head_vote)
+        )
+        turn_records.append(
+            {
+                "turn_idx": int(turn_idx),
+                "speaker": speaker,
+                "start_t": int(best_candidate["start_t"]),
+                "best_candidate_id": int(best_candidate["candidate_id"]),
+                "best_local_idx": int(best_local_idx),
+                "best_qk": float(best_candidate.get("score", 0.0)),
+                "norm_qk": float(normalized_qk.get(int(turn_idx), 0.0)),
+                "lexical_overlap": float(lexical_overlap),
+                "head_vote": float(max_head_vote),
+                "prefilter_score_norm": float(
+                    normalized_prefilter.get(int(turn_idx), 0.0)
+                ),
+                "turn_score": float(turn_score),
+                "num_scored_chunks": int(len(indexed_cands)),
+            }
+        )
+
+    ranked_turns = sorted(
+        turn_records,
+        key=lambda item: (
+            -float(item["turn_score"]),
+            int(item["start_t"]),
+            int(item["turn_idx"]),
+        ),
+    )
+    selected_turns = ranked_turns[:target_k]
+    selected_local_ids = {int(item["best_local_idx"]) for item in selected_turns}
+    selected_candidates = [
+        scored_candidates[local_idx]
+        for local_idx in range(len(scored_candidates))
+        if local_idx in selected_local_ids
+    ]
+    selected_candidates = sorted(
+        selected_candidates,
+        key=lambda cand: (
+            next(
+                idx
+                for idx, item in enumerate(selected_turns)
+                if int(item["best_candidate_id"]) == int(cand["candidate_id"])
+            ),
+            int(cand["start_t"]),
+            int(cand["candidate_id"]),
+        ),
+    )
+
+    debug = {
+        "selection_mode": "turn_rerank",
+        "target_k": int(target_k),
+        "candidate_turns_before": int(len(turn_records)),
+        "selected_turn_count": int(len(selected_turns)),
+        "turn_rerank_qk_weight": float(qk_weight),
+        "turn_rerank_lexical_weight": float(lexical_weight),
+        "turn_rerank_head_vote_weight": float(head_vote_weight),
+        "turn_rerank_preview": [
+            {
+                "turn_idx": int(item["turn_idx"]),
+                "speaker": item["speaker"],
+                "best_candidate_id": int(item["best_candidate_id"]),
+                "turn_score": float(item["turn_score"]),
+                "best_qk": float(item["best_qk"]),
+                "norm_qk": float(item["norm_qk"]),
+                "lexical_overlap": float(item["lexical_overlap"]),
+                "head_vote": float(item["head_vote"]),
+                "num_scored_chunks": int(item["num_scored_chunks"]),
+            }
+            for item in ranked_turns[:20]
+        ],
+    }
+    return selected_candidates, debug
+
+
 def _answer_cue_bonus(text, query_type):
     text = (text or "").lower()
     detail_cues = [
@@ -1674,24 +1898,25 @@ def score_mainline_topic_chunk(
         "qk": qk_result,
     }
 
-    selected_candidates = []
-    if scored_candidates:
-        if args.route_per_head and per_head_scores:
-            score_matrix = np.stack(per_head_scores, axis=0)
-            selected_local_ids = set()
-            k = min(effective_route_top_k, len(scored_candidates))
-            for head_idx in range(score_matrix.shape[1]):
-                top_local = np.argsort(score_matrix[:, head_idx])[-k:]
-                selected_local_ids.update(int(i) for i in top_local)
-            # Keep the final routing budget hard-capped even under per-head voting.
-            selected_candidates = [scored_candidates[i] for i in selected_local_ids]
-            selected_candidates = sorted(selected_candidates, key=lambda x: -x["score"])[:k]
-        else:
-            k = min(effective_route_top_k, len(scored_candidates))
-            selected_candidates = sorted(
-                scored_candidates,
-                key=lambda x: -x["score"],
-            )[:k]
+    selection_mode = str(getattr(args, "route_selection_mode", "chunk_topk")).lower()
+    if selection_mode == "turn_rerank":
+        selected_candidates, route_selection_debug = select_candidates_turn_rerank(
+            scored_candidates,
+            per_head_scores,
+            candidate_prefilter_scores,
+            transcripts,
+            query_text,
+            effective_route_top_k,
+            args,
+        )
+    else:
+        selection_mode = "chunk_topk"
+        selected_candidates, route_selection_debug = select_candidates_chunk_topk(
+            scored_candidates,
+            per_head_scores,
+            effective_route_top_k,
+            bool(args.route_per_head),
+        )
 
     if args.route_neighbor_expand > 0 and selected_candidates:
         candidate_lookup = {
@@ -1718,6 +1943,10 @@ def score_mainline_topic_chunk(
                     expanded_keys.add(key)
 
         selected_candidates = sorted(expanded_candidates, key=lambda x: -x["score"])
+        route_selection_debug["neighbor_expand"] = int(args.route_neighbor_expand)
+        route_selection_debug["selected_after_neighbor_expand"] = int(
+            len(selected_candidates)
+        )
 
     if args.route_diversity_filter and selected_candidates:
         diversity_target_keep = max(
@@ -1732,6 +1961,8 @@ def score_mainline_topic_chunk(
             max_similarity=args.route_diversity_max_similarity,
         )
         selected_candidates = sorted(selected_candidates, key=lambda x: -x["score"])
+        route_selection_debug["diversity_filter_applied"] = True
+        route_selection_debug["selected_after_diversity"] = int(len(selected_candidates))
 
     qk_ranked_candidates = sorted(
         scored_candidates,
@@ -1833,6 +2064,8 @@ def score_mainline_topic_chunk(
         ),
         "route_per_head": args.route_per_head,
         "route_neighbor_expand": args.route_neighbor_expand,
+        "route_selection_mode": selection_mode,
+        "route_selection_debug": route_selection_debug,
         "route_diversity_filter": args.route_diversity_filter,
         "route_diversity_max_similarity": args.route_diversity_max_similarity,
         "route_diversity_keep_ratio": args.route_diversity_keep_ratio,

@@ -3510,3 +3510,54 @@ adaptive policy.
 If survival recall improves but selected F1 does not, then the main failure has
 moved from early pruning to exact Q-K ranking/final top-k evidence selection.
 ```
+
+## Turn-Level Evidence Rerank On 2026-06-22
+
+Motivation:
+
+```text
+quality_guard preserved many more relevant candidates until exact Q-K, but the
+final Q-K selected-turn recall stayed low. That means the main issue is no
+longer just candidate-pool size. Relevant candidates can reach Q-K scoring, yet
+raw chunk top-k still fails to select stable answer evidence.
+
+The problem is conceptual: chunk-level Q-K affinity is a useful signal, but not
+a complete evidence-utility score. It can over-select isolated high-affinity
+chunks and miss turn/segment coverage.
+```
+
+Code change:
+
+```text
+qmsum_mainline_routing.py adds route_selection_mode:
+
+  chunk_topk   = previous behavior, raw Q-K chunk top-k
+  turn_rerank  = aggregate scored chunks to turns, then select one best chunk
+                 from each high-scoring turn
+
+turn_rerank uses:
+
+  normalized max turn Q-K score
+  query-token lexical overlap with the full turn text
+  per-head top-k vote ratio when per-head scores are available
+
+qmsum_mainline_config.py adds mainline_profile=turn_rerank. It keeps the same
+candidate-control envelope as current, but changes final evidence selection.
+This isolates the question:
+
+  does turn-level final selection improve selected recall/F1 without simply
+  widening the candidate pool?
+```
+
+How to interpret:
+
+```text
+If turn_rerank improves qk_selected recall and selected F1 with modest TTFT
+change, the next mainline should move away from raw chunk top-k.
+
+If qk_selected recall improves but answer F1 does not, the selected answer
+prompt/evidence formatting is the next bottleneck.
+
+If neither improves, the issue is likely deeper in Q-K scoring itself, not just
+the final selector.
+```
