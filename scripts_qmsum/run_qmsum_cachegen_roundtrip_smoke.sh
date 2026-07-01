@@ -1,11 +1,14 @@
 #!/bin/bash
 # ============================================================================
-# QMSum selective mainline vs CacheGen-full estimated baseline.
+# QMSum CacheGen roundtrip answer smoke.
 #
-# CacheGen-full here is an estimated baseline:
-#   F1 proxy = full-context answer F1
-#   TTFT = measured CacheGen full-KV compressed bytes + estimated transfer
-# It does not yet decode CacheGen KV and regenerate answers.
+# This is the real CacheGen quality path:
+#   full answer prompt KV -> CacheGen compress -> CacheGen decompress
+#   -> generate from decoded KV -> answer F1
+#
+# Keep the default tiny. CacheGen roundtrip is much heavier than the previous
+# estimated baseline because it compresses/decompresses one answer prompt per
+# evaluated query.
 # ============================================================================
 
 set -u
@@ -17,64 +20,39 @@ NGPUS=${NGPUS:-1}
 MEM=${MEM:-40}
 
 START_DOC=${START_DOC:-0}
-END_DOC=${END_DOC:-3}
-MAX_QUERIES=${MAX_QUERIES:-2}
+END_DOC=${END_DOC:-2}
+MAX_QUERIES=${MAX_QUERIES:-1}
 NUM_NODES=${NUM_NODES:-4}
 MAX_TOKENS=${MAX_TOKENS:-0}
 MAINLINE_PROFILE=${MAINLINE_PROFILE:-current}
 TTFT_MODEL=${TTFT_MODEL:-active_node_v2}
 
-EVAL_ANSWERS=${EVAL_ANSWERS:-1}
 CACHEGEN_QUANT_LEVEL=${CACHEGEN_QUANT_LEVEL:-2}
 CACHEGEN_CHUNK_SIZE=${CACHEGEN_CHUNK_SIZE:-256}
 CACHEGEN_MODEL_NAME=${CACHEGEN_MODEL_NAME:-mistral-community/Mistral-7B-v0.2}
 CACHEGEN_INCLUDE_ENCODE_TIME=${CACHEGEN_INCLUDE_ENCODE_TIME:-0}
-CACHEGEN_DECODE_MS=${CACHEGEN_DECODE_MS:-0.0}
-CACHEGEN_SEGMENT_COUNT_MODE=${CACHEGEN_SEGMENT_COUNT_MODE:-one}
+CACHEGEN_SEGMENT_COUNT_MODE=${CACHEGEN_SEGMENT_COUNT_MODE:-cachegen_chunks}
 
-CASE_SUMMARY_TAG=${CASE_SUMMARY_TAG:-cachegen_compare_q${MAX_QUERIES}}
-LOG_DIR=${LOG_DIR:-logs/qmsum_cachegen_compare_${START_DOC}_${END_DOC}_q${MAX_QUERIES}}
-LOG_FILE="$LOG_DIR/cachegen_compare.log"
-RESUME_IF_LOG_OK=${RESUME_IF_LOG_OK:-1}
+CASE_SUMMARY_TAG=${CASE_SUMMARY_TAG:-cachegen_roundtrip_smoke_q${MAX_QUERIES}}
+LOG_DIR=${LOG_DIR:-logs/qmsum_cachegen_roundtrip_smoke_${START_DOC}_${END_DOC}_q${MAX_QUERIES}}
+LOG_FILE="$LOG_DIR/cachegen_roundtrip_smoke.log"
 
 mkdir -p "$LOG_DIR"
-
-has_complete_log() {
-    local file="$1"
-    if [ ! -f "$file" ]; then
-        return 1
-    fi
-    grep -Fq "QMSum routing summary" "$file" || return 1
-    grep -Fq "CacheGen-full estimated baseline" "$file" || return 1
-    grep -Fq "Saved to outputs/" "$file" || return 1
-    return 0
-}
-
-if [ "$RESUME_IF_LOG_OK" -eq 1 ] && has_complete_log "$LOG_FILE"; then
-    echo "Existing complete log detected. Reuse: $LOG_FILE"
-    exit 0
-fi
 
 extra_args=()
 if [ "$MAX_TOKENS" -gt 0 ]; then
     extra_args+=(--max_tokens "$MAX_TOKENS")
 fi
-if [ "$EVAL_ANSWERS" -eq 1 ]; then
-    extra_args+=(--eval_answers)
-fi
 
 echo "============================================================"
-echo " QMSum CacheGen Compare"
+echo " QMSum CacheGen Roundtrip Answer Smoke"
 echo " profile=$MAINLINE_PROFILE"
 echo " ttft_model=$TTFT_MODEL"
 echo " docs=$START_DOC:$END_DOC"
 echo " max_queries=$MAX_QUERIES"
 echo " gpu=$GPU_ID"
-echo " num_nodes=$NUM_NODES"
-echo " eval_answers=$EVAL_ANSWERS"
 echo " cachegen_quant_level=$CACHEGEN_QUANT_LEVEL"
 echo " cachegen_chunk_size=$CACHEGEN_CHUNK_SIZE"
-echo " cachegen_include_encode_time=$CACHEGEN_INCLUDE_ENCODE_TIME"
 echo " cachegen_segment_count_mode=$CACHEGEN_SEGMENT_COUNT_MODE"
 echo " log=$LOG_FILE"
 echo "============================================================"
@@ -91,13 +69,17 @@ CUDA_VISIBLE_DEVICES="$GPU_ID" python qmsum_mainline.py \
     --end_doc "$END_DOC" \
     --max_queries_per_doc "$MAX_QUERIES" \
     --case_summary_tag "$CASE_SUMMARY_TAG" \
+    --eval_answers \
+    --no_eval_oracle_answers \
     --eval_cachegen_full \
+    --eval_cachegen_roundtrip_answer \
     --cachegen_model_name "$CACHEGEN_MODEL_NAME" \
     --cachegen_quant_level "$CACHEGEN_QUANT_LEVEL" \
     --cachegen_chunk_size "$CACHEGEN_CHUNK_SIZE" \
     --cachegen_include_encode_time "$CACHEGEN_INCLUDE_ENCODE_TIME" \
-    --cachegen_decode_ms "$CACHEGEN_DECODE_MS" \
     --cachegen_segment_count_mode "$CACHEGEN_SEGMENT_COUNT_MODE" \
+    --light_output \
+    --no_answer_markdown \
     "${extra_args[@]}" \
     2>&1 | tee "$LOG_FILE"
 

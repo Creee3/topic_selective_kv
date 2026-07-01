@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# Run the current QMSum mainline as a sharded 4-GPU closeout verification.
+# Run the current active-node v2 QMSum mainline as a sharded 4-GPU closeout verification.
 #
 # Default split:
 #   GPU 0 -> docs 0:10,  max_queries=5
@@ -33,8 +33,17 @@ MAX_QUERIES=${MAX_QUERIES:-5}
 GPUS=${GPUS:-"0 1 2 3"}
 NUM_NODES=${NUM_NODES:-4}
 EVAL_ANSWERS=${EVAL_ANSWERS:-1}
+EVAL_ORACLE_ANSWERS=${EVAL_ORACLE_ANSWERS:-1}
+LIGHT_OUTPUT=${LIGHT_OUTPUT:-0}
+WRITE_ANSWER_JSONL=${WRITE_ANSWER_JSONL:-1}
+WRITE_ANSWER_MD=${WRITE_ANSWER_MD:-1}
 RESUME_IF_LOG_OK=${RESUME_IF_LOG_OK:-1}
 MAINLINE_PROFILE=${MAINLINE_PROFILE:-current}
+TTFT_MODEL=${TTFT_MODEL:-active_node_v2}
+QK_AGGREGATION=${QK_AGGREGATION:-}
+QK_TOPK=${QK_TOPK:-}
+QK_TOKEN_POOLING=${QK_TOKEN_POOLING:-}
+QK_QUERY_TOPK_RATIO=${QK_QUERY_TOPK_RATIO:-}
 
 LOG_ROOT=${LOG_ROOT:-logs/qmsum_${MAINLINE_PROFILE}_split_${START_DOC}_${END_DOC}_q${MAX_QUERIES}}
 SUMMARY_TXT="$LOG_ROOT/summary.txt"
@@ -64,9 +73,18 @@ echo " docs=$START_DOC:$END_DOC"
 echo " docs_per_job=$DOCS_PER_JOB"
 echo " max_queries=$MAX_QUERIES"
 echo " profile=$MAINLINE_PROFILE"
+echo " ttft_model=$TTFT_MODEL"
 echo " gpus=$GPUS"
 echo " num_nodes=$NUM_NODES"
 echo " eval_answers=$EVAL_ANSWERS"
+echo " eval_oracle_answers=$EVAL_ORACLE_ANSWERS"
+echo " light_output=$LIGHT_OUTPUT"
+echo " write_answer_jsonl=$WRITE_ANSWER_JSONL"
+echo " write_answer_md=$WRITE_ANSWER_MD"
+echo " qk_aggregation=$QK_AGGREGATION"
+echo " qk_topk=$QK_TOPK"
+echo " qk_token_pooling=$QK_TOKEN_POOLING"
+echo " qk_query_topk_ratio=$QK_QUERY_TOPK_RATIO"
 echo " log_root=$LOG_ROOT"
 echo "============================================================"
 
@@ -91,7 +109,16 @@ while [ "$doc_start" -lt "$END_DOC" ]; do
         MAX_QUERIES="$MAX_QUERIES" \
         NUM_NODES="$NUM_NODES" \
         EVAL_ANSWERS="$EVAL_ANSWERS" \
+        EVAL_ORACLE_ANSWERS="$EVAL_ORACLE_ANSWERS" \
+        LIGHT_OUTPUT="$LIGHT_OUTPUT" \
+        WRITE_ANSWER_JSONL="$WRITE_ANSWER_JSONL" \
+        WRITE_ANSWER_MD="$WRITE_ANSWER_MD" \
+        QK_AGGREGATION="$QK_AGGREGATION" \
+        QK_TOPK="$QK_TOPK" \
+        QK_TOKEN_POOLING="$QK_TOKEN_POOLING" \
+        QK_QUERY_TOPK_RATIO="$QK_QUERY_TOPK_RATIO" \
         MAINLINE_PROFILE="$MAINLINE_PROFILE" \
+        TTFT_MODEL="$TTFT_MODEL" \
         CASE_SUMMARY_TAG="$tag" \
         LOG_DIR="$log_dir" \
         RESUME_IF_LOG_OK="$RESUME_IF_LOG_OK" \

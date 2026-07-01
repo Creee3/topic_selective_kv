@@ -1,10 +1,4 @@
-"""CacheGen comparison helpers for the QMSum mainline.
-
-This module intentionally implements a conservative first baseline:
-compress the full prompt KV once per document, estimate transfer TTFT from
-the compressed byte count, and use the existing full-context answer F1 as the
-quality proxy. It does not claim decompressed-KV answer quality.
-"""
+"""CacheGen comparison helpers for the QMSum mainline."""
 
 import math
 import os
@@ -12,6 +6,14 @@ import sys
 import time
 
 import torch
+
+from qmsum_answering import (
+    build_answer_retry_prompt,
+    compute_text_f1,
+    detect_bad_answer_output,
+    postprocess_generated_answer_text,
+)
+from qmsum_data import build_qmsum_answer_prompt
 
 
 def _ensure_local_lmcache_importable():
@@ -34,6 +36,338 @@ def _kv_3d_to_cachegen_blob(kv_3d, device="cuda:0"):
         value = value.detach().to(device)
         layers.append(torch.stack((key, value), dim=0))
     return torch.stack(layers, dim=0).contiguous()
+
+
+def _cachegen_blob_to_hf_past(kv_blob, upto_tokens=None):
+    """Convert CacheGen's HuggingFace 5D tensor to HF legacy past_key_values."""
+    if kv_blob.dim() != 5 or kv_blob.shape[1] != 2:
+        raise ValueError(
+            "Expected CacheGen HuggingFace blob shape "
+            "(layers, 2, heads, tokens, head_dim), got "
+            f"{tuple(kv_blob.shape)}"
+        )
+    if upto_tokens is not None:
+        kv_blob = kv_blob[:, :, :, : int(upto_tokens), :]
+
+    past = []
+    for layer_idx in range(kv_blob.shape[0]):
+        key = kv_blob[layer_idx, 0].unsqueeze(0).contiguous()
+        value = kv_blob[layer_idx, 1].unsqueeze(0).contiguous()
+        past.append((key, value))
+    return tuple(past)
+
+
+def _build_cachegen_codecs(cachegen_model_name, quant_level, chunk_size):
+    _ensure_local_lmcache_importable()
+    from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+    from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
+    from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
+
+    os.environ["QUANT_LEVEL"] = str(int(quant_level))
+    lmcache_config = LMCacheEngineConfig.from_defaults(chunk_size=int(chunk_size))
+    metadata = LMCacheEngineMetadata(
+        model_name=str(cachegen_model_name),
+        fmt="huggingface",
+        world_size=1,
+        worker_id=0,
+    )
+    return (
+        CacheGenSerializer(lmcache_config, metadata),
+        CacheGenDeserializer(lmcache_config, metadata),
+    )
+
+
+def _greedy_generate_from_past(
+    model,
+    tokenizer,
+    prompt_input_ids,
+    prompt_past,
+    max_new_tokens,
+):
+    """Generate greedily from a prompt KV by recomputing only the last token."""
+    if prompt_input_ids.shape[1] < 2:
+        raise ValueError("CacheGen roundtrip prompt must contain at least two tokens")
+
+    # Use decompressed KV for tokens [0, T-1), then feed the last prompt token.
+    # This avoids duplicating the last token in the cache while still testing the
+    # decompressed context for the first generated token.
+    past = _cachegen_blob_to_hf_past(
+        prompt_past,
+        upto_tokens=prompt_input_ids.shape[1] - 1,
+    )
+    step_input = prompt_input_ids[:, -1:]
+    generated_tokens = []
+
+    with torch.no_grad():
+        for _ in range(int(max_new_tokens)):
+            outputs = model.model(
+                input_ids=step_input,
+                past_key_values=past,
+                use_cache=True,
+            )
+            logits = model.lm_head(outputs[0])
+            next_token = logits[:, -1:, :].argmax(dim=-1)
+            generated_tokens.append(next_token)
+            past = outputs.past_key_values
+            step_input = next_token
+            if next_token.item() == tokenizer.eos_token_id:
+                break
+
+    if generated_tokens:
+        generated_ids = torch.cat(generated_tokens, dim=-1)
+    else:
+        generated_ids = prompt_input_ids.new_empty((prompt_input_ids.shape[0], 0))
+    return generated_ids
+
+
+def _roundtrip_generate_once(
+    model,
+    tokenizer,
+    prompt_text,
+    max_new_tokens,
+    cachegen_model_name,
+    quant_level,
+    chunk_size,
+    cost_config,
+    include_encode_time,
+    segment_count_mode,
+):
+    tokenize_start = time.perf_counter()
+    inputs = tokenizer(prompt_text, return_tensors="pt")
+    input_ids = inputs.input_ids.cuda()
+    _cuda_sync()
+    tokenize_ms = 1000.0 * (time.perf_counter() - tokenize_start)
+    total_tokens = int(input_ids.shape[1])
+
+    # The vendored CacheGen decoder uses config.chunk_size as its output
+    # buffer capacity. Keep the user-facing chunk_size for transfer accounting,
+    # but give the decoder enough room for the full answer prompt.
+    codec_buffer_tokens = max(int(chunk_size), total_tokens)
+    serializer, deserializer = _build_cachegen_codecs(
+        cachegen_model_name=cachegen_model_name,
+        quant_level=quant_level,
+        chunk_size=codec_buffer_tokens,
+    )
+
+    prefill_start = time.perf_counter()
+    with torch.no_grad():
+        outputs = model.model(input_ids=input_ids, use_cache=True)
+    _cuda_sync()
+    prefill_ms = 1000.0 * (time.perf_counter() - prefill_start)
+
+    kv_3d = tuple((layer[0][0], layer[1][0]) for layer in outputs.past_key_values)
+    prepare_start = time.perf_counter()
+    kv_blob = _kv_3d_to_cachegen_blob(kv_3d)
+    _cuda_sync()
+    prepare_ms = 1000.0 * (time.perf_counter() - prepare_start)
+
+    encode_start = time.perf_counter()
+    compressed = serializer.to_bytes(kv_blob)
+    _cuda_sync()
+    encode_ms = 1000.0 * (time.perf_counter() - encode_start)
+    compressed_bytes = len(compressed)
+
+    decode_start = time.perf_counter()
+    decoded_blob = deserializer.from_bytes(compressed)
+    _cuda_sync()
+    decode_ms = 1000.0 * (time.perf_counter() - decode_start)
+
+    generate_start = time.perf_counter()
+    generated_ids = _greedy_generate_from_past(
+        model,
+        tokenizer,
+        input_ids,
+        decoded_blob,
+        max_new_tokens=max_new_tokens,
+    )
+    _cuda_sync()
+    generation_ms = 1000.0 * (time.perf_counter() - generate_start)
+
+    raw_answer_text = tokenizer.decode(
+        generated_ids[0],
+        skip_special_tokens=True,
+    )
+    answer_text, postprocess_actions = postprocess_generated_answer_text(
+        raw_answer_text
+    )
+
+    transfer_estimate = _estimate_transfer_from_bytes(
+        compressed_bytes=compressed_bytes,
+        total_tokens=total_tokens,
+        chunk_size=int(chunk_size),
+        cost_config=cost_config,
+        prepare_ms=prepare_ms,
+        encode_ms=encode_ms,
+        include_encode_time=bool(include_encode_time),
+        cachegen_decode_ms=float(decode_ms),
+        segment_count_mode=str(segment_count_mode),
+    )
+    transfer_estimate.update(
+        {
+            "prompt_tokens": int(total_tokens),
+            "tokenize_ms": float(tokenize_ms),
+            "prefill_ms": float(prefill_ms),
+            "measured_decode_ms": float(decode_ms),
+            "generation_ms": float(generation_ms),
+            "raw_answer_text": raw_answer_text,
+            "answer": answer_text,
+            "postprocess_actions": postprocess_actions,
+        }
+    )
+
+    del generated_ids, decoded_blob, compressed, kv_blob, kv_3d, outputs, input_ids
+    torch.cuda.empty_cache()
+    return transfer_estimate
+
+
+def build_cachegen_roundtrip_answer_eval(
+    model,
+    tokenizer,
+    transcripts,
+    query_text,
+    gold_answer,
+    max_new_tokens,
+    cost_config,
+    answer_prompt_style="basic",
+    cachegen_model_name="mistral-community/Mistral-7B-v0.2",
+    quant_level=2,
+    chunk_size=256,
+    include_encode_time=False,
+    segment_count_mode="one",
+    answer_eval=None,
+    system_cost=None,
+):
+    """Compress, decompress, generate from the decoded KV, and compute answer F1."""
+    prior_quant_level = os.environ.get("QUANT_LEVEL")
+    try:
+        full_prompt = build_qmsum_answer_prompt(
+            transcripts,
+            query_text,
+            turn_indices=None,
+            prompt_style=answer_prompt_style,
+        )
+        first = _roundtrip_generate_once(
+            model=model,
+            tokenizer=tokenizer,
+            prompt_text=full_prompt,
+            max_new_tokens=max_new_tokens,
+            cachegen_model_name=cachegen_model_name,
+            quant_level=quant_level,
+            chunk_size=chunk_size,
+            cost_config=cost_config,
+            include_encode_time=include_encode_time,
+            segment_count_mode=segment_count_mode,
+        )
+        initial_bad = detect_bad_answer_output(first["answer"])
+        used = first
+        retry = None
+        retried = False
+        used_retry = False
+
+        if initial_bad["is_bad"]:
+            retried = True
+            retry_prompt = build_answer_retry_prompt(full_prompt)
+            retry = _roundtrip_generate_once(
+                model=model,
+                tokenizer=tokenizer,
+                prompt_text=retry_prompt,
+                max_new_tokens=max_new_tokens,
+                cachegen_model_name=cachegen_model_name,
+                quant_level=quant_level,
+                chunk_size=chunk_size,
+                cost_config=cost_config,
+                include_encode_time=include_encode_time,
+                segment_count_mode=segment_count_mode,
+            )
+            retry_bad = detect_bad_answer_output(retry["answer"])
+            if not retry_bad["is_bad"]:
+                used = retry
+                used_retry = True
+        else:
+            retry_bad = {"is_bad": False, "reasons": []}
+
+        final_bad = detect_bad_answer_output(used["answer"])
+        answer_f1 = compute_text_f1(used["answer"], gold_answer)
+
+        result = dict(used)
+        result.update(
+            {
+                "enabled": True,
+                "status": "ok",
+                "baseline_type": "cachegen_full_roundtrip_answer",
+                "quality_note": (
+                    "F1 is generated from a CacheGen-compressed then "
+                    "decompressed full answer prompt KV."
+                ),
+                "cachegen_model_name": str(cachegen_model_name),
+                "cachegen_quant_level": int(quant_level),
+                "cachegen_chunk_size": int(chunk_size),
+                "answer_prompt_style": str(answer_prompt_style),
+                "max_new_tokens": int(max_new_tokens),
+                "gold_answer": gold_answer,
+                "answer_f1": float(answer_f1),
+                "bad_output": bool(final_bad["is_bad"]),
+                "bad_output_reasons": final_bad["reasons"],
+                "initial_bad_output": bool(initial_bad["is_bad"]),
+                "initial_bad_output_reasons": initial_bad["reasons"],
+                "retried": bool(retried),
+                "used_retry": bool(used_retry),
+                "retry_bad_output": bool(retry_bad["is_bad"]),
+                "retry_bad_output_reasons": retry_bad["reasons"],
+            }
+        )
+        if retry is not None:
+            result["retry_answer"] = retry.get("answer", "")
+            result["retry_answer_f1"] = float(
+                compute_text_f1(retry.get("answer", ""), gold_answer)
+            )
+            result["retry_postprocess_actions"] = retry.get(
+                "postprocess_actions",
+                [],
+            )
+
+        if answer_eval:
+            full_f1 = float(answer_eval.get("full_answer_f1", 0.0))
+            selected_f1 = float(answer_eval.get("selected_answer_f1", 0.0))
+            result["full_answer_f1"] = float(full_f1)
+            result["selected_answer_f1"] = float(selected_f1)
+            result["answer_f1_delta_vs_full"] = float(answer_f1 - full_f1)
+            result["answer_f1_delta_vs_selected"] = float(answer_f1 - selected_f1)
+            result["selected_answer_f1_delta_vs_cachegen_roundtrip"] = float(
+                selected_f1 - answer_f1
+            )
+
+        selected_cost = (system_cost or {}).get("selected", {})
+        selected_ttft_ms = float(selected_cost.get("estimated_ttft_ms", 0.0))
+        cachegen_ttft_ms = float(result.get("estimated_ttft_ms", 0.0))
+        result["selected_ttft_ms"] = float(selected_ttft_ms)
+        result["selected_vs_cachegen_roundtrip_ttft_delta_ms"] = float(
+            selected_ttft_ms - cachegen_ttft_ms
+        )
+        if cachegen_ttft_ms > 0:
+            result["selected_vs_cachegen_roundtrip_ttft_saving_ratio"] = float(
+                1.0 - (selected_ttft_ms / cachegen_ttft_ms)
+            )
+        else:
+            result["selected_vs_cachegen_roundtrip_ttft_saving_ratio"] = 0.0
+        return result
+    except Exception as exc:
+        torch.cuda.empty_cache()
+        return {
+            "enabled": True,
+            "status": "error",
+            "baseline_type": "cachegen_full_roundtrip_answer",
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+            "cachegen_model_name": str(cachegen_model_name),
+            "cachegen_quant_level": int(quant_level),
+            "cachegen_chunk_size": int(chunk_size),
+        }
+    finally:
+        if prior_quant_level is None:
+            os.environ.pop("QUANT_LEVEL", None)
+        else:
+            os.environ["QUANT_LEVEL"] = prior_quant_level
 
 
 def _estimate_transfer_from_bytes(

@@ -47,7 +47,43 @@ NUMBER_TO_ORDINAL = {v: k for k, v in ORDINAL_TO_NUMBER.items() if not k[0].isdi
 # Chunk Q-K 打分辅助函数
 # ================================================================
 
-def _get_qk_attention(query_ids, chunk_keys_list, model, layer_idx):
+def _resolve_query_topk(query_len, query_topk_ratio):
+    if query_len <= 0:
+        return 1
+    try:
+        ratio = float(query_topk_ratio)
+    except (TypeError, ValueError):
+        ratio = 0.25
+    if ratio <= 0.0:
+        ratio = 0.25
+    return max(1, min(int(query_len), int(np.ceil(float(query_len) * ratio))))
+
+
+def _pool_qk_attention(attn, mode="mean", query_topk_ratio=0.25):
+    """Pool raw Q-K logits into one score per head."""
+    mode = str(mode or "mean").lower()
+    if mode == "mean":
+        return attn.mean(dim=(2, 3)).squeeze(0)
+    if mode == "query_mean_topk":
+        per_query = attn.mean(dim=3)
+    elif mode == "query_peak_topk":
+        per_query = attn.max(dim=3).values
+    else:
+        raise ValueError(f"Unknown qk token pooling mode: {mode}")
+
+    query_len = int(per_query.shape[-1])
+    topk = _resolve_query_topk(query_len, query_topk_ratio)
+    return per_query.topk(k=topk, dim=-1).values.mean(dim=-1).squeeze(0)
+
+
+def _get_qk_attention(
+    query_ids,
+    chunk_keys_list,
+    model,
+    layer_idx,
+    qk_token_pooling="mean",
+    qk_query_topk_ratio=0.25,
+):
     """单层 Q-K attention 原始分数，返回 (n_chunks, n_heads) numpy 数组"""
     num_layers = len(model.model.layers)
     if layer_idx < 0:
@@ -82,7 +118,11 @@ def _get_qk_attention(query_ids, chunk_keys_list, model, layer_idx):
             K_layer = K_layer.repeat_interleave(n_rep, dim=1)
         attn = torch.matmul(Q, K_layer.transpose(-2, -1)) / scale
         # attn: (1, num_heads, query_len, chunk_len)
-        per_head = attn.mean(dim=(2, 3)).squeeze(0)  # (num_heads,)
+        per_head = _pool_qk_attention(
+            attn,
+            mode=qk_token_pooling,
+            query_topk_ratio=qk_query_topk_ratio,
+        )
         per_head_scores.append(per_head.cpu().numpy())
 
     return np.stack(per_head_scores, axis=0)  # (n_chunks, n_heads)
@@ -133,7 +173,13 @@ def build_query_q_cache(query_ids, model, layer_indices):
     return cache
 
 
-def _get_qk_attention_from_query_cache(query_q_cache, chunk_keys_list, layer_idx):
+def _get_qk_attention_from_query_cache(
+    query_q_cache,
+    chunk_keys_list,
+    layer_idx,
+    qk_token_pooling="mean",
+    qk_query_topk_ratio=0.25,
+):
     """Single-layer Q-K scores using precomputed query Q tensors."""
     num_layers = int(query_q_cache.get("num_model_layers", 0) or 0)
     if layer_idx < 0:
@@ -152,24 +198,54 @@ def _get_qk_attention_from_query_cache(query_q_cache, chunk_keys_list, layer_idx
             n_rep = num_heads // num_kv_heads
             K_layer = K_layer.repeat_interleave(n_rep, dim=1)
         attn = torch.matmul(Q, K_layer.transpose(-2, -1)) / scale
-        per_head = attn.mean(dim=(2, 3)).squeeze(0)
+        per_head = _pool_qk_attention(
+            attn,
+            mode=qk_token_pooling,
+            query_topk_ratio=qk_query_topk_ratio,
+        )
         per_head_scores.append(per_head.cpu().numpy())
 
     return np.stack(per_head_scores, axis=0)
 
 
-def _chunk_qk_scores_per_head(query_ids, chunk_keys_list, model, layer_indices):
+def _chunk_qk_scores_per_head(
+    query_ids,
+    chunk_keys_list,
+    model,
+    layer_indices,
+    qk_token_pooling="mean",
+    qk_query_topk_ratio=0.25,
+):
     """多层逐头打分，返回 (n_chunks, n_heads) numpy + info"""
     all_scores = []
     for lidx in layer_indices:
-        scores = _get_qk_attention(query_ids, chunk_keys_list, model, lidx)
+        scores = _get_qk_attention(
+            query_ids,
+            chunk_keys_list,
+            model,
+            lidx,
+            qk_token_pooling=qk_token_pooling,
+            qk_query_topk_ratio=qk_query_topk_ratio,
+        )
         all_scores.append(scores)
 
     avg_scores = np.mean(all_scores, axis=0)  # (n_chunks, n_heads)
-    return avg_scores, {"layers": layer_indices, "n_heads": avg_scores.shape[1]}
+    return avg_scores, {
+        "layers": layer_indices,
+        "n_heads": avg_scores.shape[1],
+        "qk_token_pooling": str(qk_token_pooling),
+        "qk_query_topk_ratio": float(qk_query_topk_ratio),
+    }
 
 
-def _chunk_qk_scores_per_head_cached(query_q_cache, chunk_keys_list, model, layer_indices):
+def _chunk_qk_scores_per_head_cached(
+    query_q_cache,
+    chunk_keys_list,
+    model,
+    layer_indices,
+    qk_token_pooling="mean",
+    qk_query_topk_ratio=0.25,
+):
     """Multi-layer per-head scores using precomputed query Q tensors."""
     num_layers = int(query_q_cache.get("num_model_layers", len(model.model.layers)) or 0)
     normalized_layers = [
@@ -178,7 +254,13 @@ def _chunk_qk_scores_per_head_cached(query_q_cache, chunk_keys_list, model, laye
     ]
     all_scores = []
     for lidx in normalized_layers:
-        scores = _get_qk_attention_from_query_cache(query_q_cache, chunk_keys_list, lidx)
+        scores = _get_qk_attention_from_query_cache(
+            query_q_cache,
+            chunk_keys_list,
+            lidx,
+            qk_token_pooling=qk_token_pooling,
+            qk_query_topk_ratio=qk_query_topk_ratio,
+        )
         all_scores.append(scores)
 
     avg_scores = np.mean(all_scores, axis=0)
@@ -186,6 +268,8 @@ def _chunk_qk_scores_per_head_cached(query_q_cache, chunk_keys_list, model, laye
         "layers": normalized_layers,
         "n_heads": avg_scores.shape[1],
         "query_q_cache": True,
+        "qk_token_pooling": str(qk_token_pooling),
+        "qk_query_topk_ratio": float(qk_query_topk_ratio),
     }
 
 

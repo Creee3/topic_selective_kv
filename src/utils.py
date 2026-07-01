@@ -1,19 +1,15 @@
 import torch
-from fastchat.model import load_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import json
 import time
 import argparse
 import json
 import numpy as np
-import openai
 from collections import Counter
 import re 
 import string 
 import pickle
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 import os
-from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
 def f1_score(prediction, ground_truth, **kwargs):    #纯数学
     common = Counter(prediction) & Counter(ground_truth)
     num_same = sum(common.values())
@@ -64,9 +60,10 @@ DATASET_TO_PATH = {
     "nqa": "test_data/nqa.jsonl"
 }
 
-
-openai.api_base = "https://api.deepseek.com"
 def get_eval(user_prompt):
+    import openai
+
+    openai.api_base = "https://api.deepseek.com"
     for i in range(MAX_API_RETRY):
         try:
             response = openai.ChatCompletion.create(
@@ -142,9 +139,69 @@ def calculate_acc(dataset_name, prediction, label):
 #   8-bit 模型权重: 70亿参数 × 1字节 = 7GB  → 省一半显存
 #   注意：这是模型权重的量化，和 KV Cache 量化是两回事！
 # ============================================================
-def define_model_and_tokenizer(model_id, num_gpus=1, max_gpu_memory=48, load_8bit=True):
+def _dtype_from_name(dtype_name):
+    if dtype_name in (None, "auto"):
+        return "auto"
+    if dtype_name == "bf16":
+        return torch.bfloat16
+    if dtype_name == "fp16":
+        return torch.float16
+    if dtype_name == "fp32":
+        return torch.float32
+    raise ValueError(f"unknown dtype: {dtype_name}")
+
+
+def define_model_and_tokenizer(
+    model_id,
+    num_gpus=1,
+    max_gpu_memory=48,
+    load_8bit=True,
+    model_loader="fastchat",
+    hf_quantization="none",
+    hf_dtype="bf16",
+    hf_attn_impl="auto",
+    hf_device_map="auto",
+):
     """ Define the model and tokenizer
     """
+    if model_loader == "hf":
+        dtype = _dtype_from_name(hf_dtype)
+        load_kwargs = {
+            "device_map": hf_device_map,
+            "max_memory": {i: f"{max_gpu_memory}GiB" for i in range(num_gpus)},
+            "trust_remote_code": True,
+            "low_cpu_mem_usage": True,
+        }
+        if dtype != "auto":
+            load_kwargs["torch_dtype"] = dtype
+        else:
+            load_kwargs["torch_dtype"] = "auto"
+        if hf_attn_impl != "auto":
+            load_kwargs["attn_implementation"] = hf_attn_impl
+        if hf_quantization != "none":
+            from transformers import BitsAndBytesConfig
+
+            compute_dtype = dtype if dtype != "auto" else torch.bfloat16
+            if hf_quantization == "4bit":
+                load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=compute_dtype,
+                    bnb_4bit_use_double_quant=True,
+                )
+            elif hf_quantization == "8bit":
+                load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+            else:
+                raise ValueError(f"unknown hf_quantization: {hf_quantization}")
+            load_kwargs.pop("torch_dtype", None)
+
+        model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        model.eval()
+        return model, tokenizer
+
     # ============================================================
     # 分支1: 70B 模型（~140GB FP16 → ~70GB 8-bit）
     # 需要 4 张 A40（每张 48GB）才装得下
@@ -173,6 +230,8 @@ def define_model_and_tokenizer(model_id, num_gpus=1, max_gpu_memory=48, load_8bi
     # FastChat 的 load_model 内部也是调 from_pretrained，但帮你自动算了显存分配
     # ============================================================
     else:
+        from fastchat.model import load_model
+
         model, tokenizer = load_model(
                 model_id,
                 device="cuda",                          # 模型放 GPU 上
@@ -545,6 +604,9 @@ def merge(configs, args, doc_id, length, orig_kv=None, layer_to_device_id=None):
         #   读 pickle → CacheGenDeserializer.from_bytes → tensor_to_tuple
         else:
             # 读编码好的文件: {doc_id}_{chunk_id}_{level}.pkl
+            from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+            from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
+
             os.environ["QUANT_LEVEL"] = str(configs[chunk_id])
             loaded_bytes = pickle.load(open(
                 f"{args.save_dir}/{doc_id}_{chunk_id}_{configs[chunk_id]}.pkl",

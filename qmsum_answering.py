@@ -293,6 +293,7 @@ def build_answer_eval(
     answer_evidence_max_entries=80,
     answer_evidence_max_chars=600,
     oracle_turns=None,
+    evaluate_oracle_answer=True,
 ):
     if selected_answer_turns is None:
         selected_answer_turns = selected_turns
@@ -319,7 +320,7 @@ def build_answer_eval(
             prompt_style=answer_prompt_style,
         )
     oracle_prompt = None
-    if oracle_turns:
+    if evaluate_oracle_answer and oracle_turns:
         oracle_prompt = build_qmsum_answer_prompt(
             transcripts,
             query_text,
@@ -347,7 +348,8 @@ def build_answer_eval(
         "used_retry": False,
         "postprocess_actions": [],
     }
-    if oracle_prompt is not None:
+    oracle_answer_available = oracle_prompt is not None
+    if oracle_answer_available:
         oracle_answer, oracle_generation = generate_answer_text_with_retry(
             model,
             tokenizer,
@@ -358,11 +360,15 @@ def build_answer_eval(
     full_answer_f1 = compute_text_f1(full_answer, gold_answer)
     selected_answer_f1 = compute_text_f1(selected_answer, gold_answer)
     oracle_answer_f1 = (
-        compute_text_f1(oracle_answer, gold_answer) if oracle_prompt is not None else 0.0
+        compute_text_f1(oracle_answer, gold_answer) if oracle_answer_available else 0.0
     )
     full_bad_output = detect_bad_answer_output(full_answer)
     selected_bad_output = detect_bad_answer_output(selected_answer)
-    oracle_bad_output = detect_bad_answer_output(oracle_answer)
+    oracle_bad_output = (
+        detect_bad_answer_output(oracle_answer)
+        if oracle_answer_available
+        else {"is_bad": False, "reasons": []}
+    )
 
     full_context_tokens = len(
         tokenizer(full_prompt, add_special_tokens=False).input_ids
@@ -372,7 +378,7 @@ def build_answer_eval(
     )
     oracle_context_tokens = (
         len(tokenizer(oracle_prompt, add_special_tokens=False).input_ids)
-        if oracle_prompt is not None
+        if oracle_answer_available
         else 0
     )
     context_token_saving_ratio = 0.0
@@ -386,22 +392,35 @@ def build_answer_eval(
         "full_answer": full_answer,
         "selected_answer": selected_answer,
         "oracle_answer": oracle_answer,
+        "oracle_answer_available": bool(oracle_answer_available),
         "full_answer_f1": float(full_answer_f1),
         "selected_answer_f1": float(selected_answer_f1),
         "oracle_answer_f1": float(oracle_answer_f1),
         "answer_f1_delta": float(selected_answer_f1 - full_answer_f1),
-        "oracle_answer_f1_delta_vs_full": float(oracle_answer_f1 - full_answer_f1),
-        "selected_answer_f1_delta_vs_oracle": float(
-            selected_answer_f1 - oracle_answer_f1
+        "oracle_answer_f1_delta_vs_full": (
+            float(oracle_answer_f1 - full_answer_f1)
+            if oracle_answer_available
+            else None
+        ),
+        "selected_answer_f1_delta_vs_oracle": (
+            float(selected_answer_f1 - oracle_answer_f1)
+            if oracle_answer_available
+            else None
         ),
         "full_context_tokens": int(full_context_tokens),
         "selected_context_tokens": int(selected_context_tokens),
         "oracle_context_tokens": int(oracle_context_tokens),
         "context_token_saving_ratio": float(context_token_saving_ratio),
         "selected_beats_or_matches_full": bool(selected_answer_f1 >= full_answer_f1),
-        "oracle_beats_or_matches_full": bool(oracle_answer_f1 >= full_answer_f1),
-        "selected_beats_or_matches_oracle": bool(
-            selected_answer_f1 >= oracle_answer_f1
+        "oracle_beats_or_matches_full": (
+            bool(oracle_answer_f1 >= full_answer_f1)
+            if oracle_answer_available
+            else None
+        ),
+        "selected_beats_or_matches_oracle": (
+            bool(selected_answer_f1 >= oracle_answer_f1)
+            if oracle_answer_available
+            else None
         ),
         "selected_context_mode": selected_context_mode,
         "answer_prompt_style": answer_prompt_style,

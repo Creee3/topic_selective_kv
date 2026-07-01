@@ -3,14 +3,14 @@
 # Clean current QMSum mainline runner.
 #
 # This is the entry point to use when you want the latest stabilized
-# selective-fetch path, not an ablation branch.
+# active-node v2 selective-fetch path, not an ablation branch.
 #
 # Current profile:
 #   manually/dataset labeled topics as deployable semantic nodes
-#   -> lexical top-1 topic routing
-#   -> lexical candidate prefilter
-#   -> lexical coarse segment gate
-#   -> batched exact Q-K chunk scoring
+#   -> all topic/block candidates expose lightweight remote-node summaries
+#   -> request node scores summaries with query-Q
+#   -> rank-fusion combines summary/Q-K signals
+#   -> selected full-KV blocks are fetched
 #   -> virtual-node transfer accounting
 #   -> optional answer F1
 # ============================================================================
@@ -29,9 +29,18 @@ MAX_QUERIES=${MAX_QUERIES:-5}
 NUM_NODES=${NUM_NODES:-4}
 MAX_TOKENS=${MAX_TOKENS:-0}
 CACHE_QUERY_Q=${CACHE_QUERY_Q:-1}
+QK_AGGREGATION=${QK_AGGREGATION:-}
+QK_TOPK=${QK_TOPK:-}
+QK_TOKEN_POOLING=${QK_TOKEN_POOLING:-}
+QK_QUERY_TOPK_RATIO=${QK_QUERY_TOPK_RATIO:-}
 MAINLINE_PROFILE=${MAINLINE_PROFILE:-current}
+TTFT_MODEL=${TTFT_MODEL:-active_node_v2}
 
 EVAL_ANSWERS=${EVAL_ANSWERS:-1}
+EVAL_ORACLE_ANSWERS=${EVAL_ORACLE_ANSWERS:-1}
+LIGHT_OUTPUT=${LIGHT_OUTPUT:-0}
+WRITE_ANSWER_JSONL=${WRITE_ANSWER_JSONL:-1}
+WRITE_ANSWER_MD=${WRITE_ANSWER_MD:-1}
 CASE_SUMMARY_TAG=${CASE_SUMMARY_TAG:-current_mainline}
 LOG_DIR=${LOG_DIR:-logs/qmsum_current_mainline_${START_DOC}_${END_DOC}_q${MAX_QUERIES}}
 LOG_FILE=${LOG_FILE:-"$LOG_DIR/${MAINLINE_PROFILE}.log"}
@@ -61,10 +70,34 @@ fi
 if [ "$EVAL_ANSWERS" -eq 1 ]; then
     extra_args+=(--eval_answers)
 fi
+if [ "$EVAL_ORACLE_ANSWERS" -eq 0 ]; then
+    extra_args+=(--no_eval_oracle_answers)
+fi
+if [ "$LIGHT_OUTPUT" -eq 1 ]; then
+    extra_args+=(--light_output)
+fi
+if [ "$WRITE_ANSWER_JSONL" -eq 0 ]; then
+    extra_args+=(--no_answer_jsonl)
+fi
+if [ "$WRITE_ANSWER_MD" -eq 0 ]; then
+    extra_args+=(--no_answer_markdown)
+fi
 if [ "$CACHE_QUERY_Q" -eq 1 ]; then
     extra_args+=(--cache_query_q)
 else
     extra_args+=(--no_cache_query_q)
+fi
+if [ -n "$QK_AGGREGATION" ]; then
+    extra_args+=(--qk_aggregation "$QK_AGGREGATION")
+fi
+if [ -n "$QK_TOPK" ]; then
+    extra_args+=(--qk_topk "$QK_TOPK")
+fi
+if [ -n "$QK_TOKEN_POOLING" ]; then
+    extra_args+=(--qk_token_pooling "$QK_TOKEN_POOLING")
+fi
+if [ -n "$QK_QUERY_TOPK_RATIO" ]; then
+    extra_args+=(--qk_query_topk_ratio "$QK_QUERY_TOPK_RATIO")
 fi
 
 echo "============================================================"
@@ -75,12 +108,22 @@ echo " max_queries=$MAX_QUERIES"
 echo " gpu=$GPU_ID"
 echo " num_nodes=$NUM_NODES"
 echo " eval_answers=$EVAL_ANSWERS"
+echo " eval_oracle_answers=$EVAL_ORACLE_ANSWERS"
+echo " light_output=$LIGHT_OUTPUT"
+echo " write_answer_jsonl=$WRITE_ANSWER_JSONL"
+echo " write_answer_md=$WRITE_ANSWER_MD"
 echo " cache_query_q=$CACHE_QUERY_Q"
+echo " ttft_model=$TTFT_MODEL"
+echo " qk_aggregation=$QK_AGGREGATION"
+echo " qk_topk=$QK_TOPK"
+echo " qk_token_pooling=$QK_TOKEN_POOLING"
+echo " qk_query_topk_ratio=$QK_QUERY_TOPK_RATIO"
 echo " log=$LOG_FILE"
 echo "============================================================"
 
 CUDA_VISIBLE_DEVICES="$GPU_ID" python qmsum_mainline.py \
     --mainline_profile "$MAINLINE_PROFILE" \
+    --ttft_model "$TTFT_MODEL" \
     --data_path "$DATA_PATH" \
     --model_id "$MODEL_ID" \
     --num_gpus "$NGPUS" \

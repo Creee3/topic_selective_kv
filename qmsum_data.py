@@ -9,6 +9,105 @@ def load_qmsum_sample(filepath, doc_id):
     raise IndexError(f"doc_id={doc_id} out of range")
 
 
+def _load_jsonl_sample(filepath, doc_id):
+    with open(filepath, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if i == doc_id:
+                return json.loads(line.strip())
+    raise IndexError(f"doc_id={doc_id} out of range")
+
+
+def _normalize_hotpotqa_sample(sample):
+    context = sample.get("context") or {}
+    titles = list(context.get("title") or [])
+    sentence_groups = list(context.get("sentences") or [])
+
+    transcripts = []
+    title_sentence_to_turn = {}
+    topic_list = []
+
+    for title_idx, title in enumerate(titles):
+        title_text = str(title).strip() or f"paragraph_{title_idx}"
+        sentences = sentence_groups[title_idx] if title_idx < len(sentence_groups) else []
+        start_turn = len(transcripts)
+
+        for sent_idx, sentence in enumerate(sentences):
+            sentence_text = str(sentence).strip()
+            if not sentence_text:
+                continue
+            turn_idx = len(transcripts)
+            transcripts.append(
+                {
+                    "speaker": title_text,
+                    "content": sentence_text,
+                    "source_title": title_text,
+                    "source_sentence_idx": int(sent_idx),
+                }
+            )
+            title_sentence_to_turn[(title_text, int(sent_idx))] = int(turn_idx)
+
+        end_turn = len(transcripts) - 1
+        if end_turn >= start_turn:
+            topic_list.append(
+                {
+                    "topic": title_text,
+                    "relevant_text_span": [[int(start_turn), int(end_turn)]],
+                    "source_title": title_text,
+                }
+            )
+
+    support = sample.get("supporting_facts") or {}
+    support_titles = list(support.get("title") or [])
+    support_sent_ids = list(support.get("sent_id") or [])
+    relevant_turns = []
+    for title, sent_id in zip(support_titles, support_sent_ids):
+        title_text = str(title).strip()
+        key = (title_text, int(sent_id))
+        turn_idx = title_sentence_to_turn.get(key)
+        if turn_idx is not None:
+            relevant_turns.append(int(turn_idx))
+            continue
+
+        title_lower = title_text.lower()
+        if not title_lower:
+            continue
+        for candidate_turn_idx, turn in enumerate(transcripts):
+            content_lower = str(turn.get("content", "")).lower()
+            speaker_lower = str(turn.get("speaker", "")).lower()
+            if title_lower == speaker_lower or title_lower in content_lower:
+                relevant_turns.append(int(candidate_turn_idx))
+                break
+
+    relevant_turns = sorted(set(relevant_turns))
+    query = {
+        "query": str(sample.get("question", "")).strip(),
+        "answer": str(sample.get("answer", "")).strip(),
+        "relevant_text_span": [[turn_idx, turn_idx] for turn_idx in relevant_turns],
+        "supporting_facts": [
+            {"title": str(title), "sent_id": int(sent_id)}
+            for title, sent_id in zip(support_titles, support_sent_ids)
+        ],
+    }
+
+    return {
+        "dataset": "hotpotqa",
+        "meeting_id": str(sample.get("id", "")),
+        "meeting_transcripts": transcripts,
+        "topic_list": topic_list,
+        "specific_query_list": [query],
+        "hotpotqa_type": sample.get("type", ""),
+        "hotpotqa_level": sample.get("level", ""),
+    }
+
+
+def load_mainline_sample(filepath, doc_id, dataset="qmsum"):
+    dataset_name = (dataset or "qmsum").strip().lower()
+    if dataset_name == "qmsum":
+        return load_qmsum_sample(filepath, doc_id)
+    if dataset_name == "hotpotqa":
+        return _normalize_hotpotqa_sample(_load_jsonl_sample(filepath, doc_id))
+    raise ValueError(f"Unsupported dataset: {dataset}")
+
 def _find_first_overlapping_token(offset_mapping, char_start, char_end):
     for tok_idx, (tok_start, tok_end) in enumerate(offset_mapping):
         if tok_end <= tok_start:
