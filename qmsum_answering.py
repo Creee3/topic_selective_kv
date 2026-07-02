@@ -130,11 +130,39 @@ def detect_bad_answer_output(answer_text):
         reasons.append("empty_or_stub")
     if has_repetitive_answer_text(text):
         reasons.append("repetitive_answer")
+    if has_gibberish_answer_text(text):
+        reasons.append("gibberish_or_token_fragment")
     return {
         "is_bad": bool(reasons),
         "reasons": sorted(set(reasons)),
     }
 
+
+def has_gibberish_answer_text(answer_text):
+    text = answer_text or ""
+    compact = re.sub(r"\s+", "", text)
+    if len(compact) < 24:
+        return False
+    if compact.count("!") >= 12:
+        return True
+    if re.search(r"(?:\b[A-Za-z_]{3,}\b)(?:\s+\1){4,}", text, re.IGNORECASE):
+        return True
+    mojibake_marks = sum(text.count(mark) for mark in ("\u951f", "\u923b", "\u979a", "\u891e", "\u750d"))
+    if mojibake_marks >= 2:
+        return True
+    punct_or_symbol = sum(1 for ch in compact if not ch.isalnum())
+    if punct_or_symbol / max(1, len(compact)) >= 0.45:
+        return True
+    ascii_words = re.findall(r"[A-Za-z_]{2,}", text)
+    if len(ascii_words) >= 12:
+        short_or_code = sum(
+            1
+            for word in ascii_words
+            if "_" in word or len(word) <= 3 or word.lower() in {"ev", "fmt", "regex", "const"}
+        )
+        if short_or_code / len(ascii_words) >= 0.55:
+            return True
+    return False
 
 def has_repetitive_answer_text(answer_text):
     text = answer_text or ""
