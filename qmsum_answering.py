@@ -145,7 +145,7 @@ def has_gibberish_answer_text(answer_text):
         return False
     if compact.count("!") >= 12:
         return True
-    if re.search(r"(?:\b[A-Za-z_]{3,}\b)(?:\s+\1){4,}", text, re.IGNORECASE):
+    if re.search(r"\b([A-Za-z_]{3,})\b(?:\s+\1){4,}", text, re.IGNORECASE):
         return True
     mojibake_marks = sum(text.count(mark) for mark in ("\u951f", "\u923b", "\u979a", "\u891e", "\u750d"))
     if mojibake_marks >= 2:
