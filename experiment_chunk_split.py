@@ -123,7 +123,7 @@ def _get_qk_attention(
             mode=qk_token_pooling,
             query_topk_ratio=qk_query_topk_ratio,
         )
-        per_head_scores.append(per_head.cpu().numpy())
+        per_head_scores.append(per_head.float().cpu().numpy())
 
     return np.stack(per_head_scores, axis=0)  # (n_chunks, n_heads)
 
@@ -203,7 +203,7 @@ def _get_qk_attention_from_query_cache(
             mode=qk_token_pooling,
             query_topk_ratio=qk_query_topk_ratio,
         )
-        per_head_scores.append(per_head.cpu().numpy())
+        per_head_scores.append(per_head.float().cpu().numpy())
 
     return np.stack(per_head_scores, axis=0)
 

@@ -1110,6 +1110,7 @@ def main(args):
                     answer_evidence_max_chars=args.answer_evidence_max_chars,
                     oracle_turns=sorted(relevant_turns),
                     evaluate_oracle_answer=args.eval_oracle_answers,
+                    progress_label=f"doc_id={doc_id} query_idx={query_idx}",
                 )
 
             cachegen_full_estimate = build_cachegen_case_metrics(

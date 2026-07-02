@@ -170,7 +170,9 @@ def rank_scores(scores):
 
 
 def stack_keys_from_kv(kv_chunk):
-    return torch.stack([layer[0].squeeze(0) for layer in kv_chunk], dim=0)
+    # KV layers may live on different devices when the model is sharded.
+    # Normalize to CPU before stacking so summary/selection code stays device-agnostic.
+    return torch.stack([layer[0].squeeze(0).detach().cpu() for layer in kv_chunk], dim=0)
 
 
 def assign_turn_to_node(turn_idx, num_turns, num_nodes, mode="round_robin"):

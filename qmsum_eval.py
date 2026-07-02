@@ -318,13 +318,6 @@ def build_system_cost_estimate(
         cost_config,
     )
     full_transfer_unit_count = max(0, int(num_virtual_nodes))
-    full = _estimate_transfer_case(
-        total_tokens,
-        full_transfer_unit_count,
-        full_transfer_unit_count,
-        0.0,
-        cost_config,
-    )
 
     contacted_nodes = int(
         transfer_accounting.get("unique_transfer_unit_count", 0)
@@ -367,6 +360,10 @@ def build_system_cost_estimate(
     node_summary_score_ms = float(routing_breakdown.get("node_summary_score_ms", 0.0))
     node_summary_aggregate_ms = float(routing_breakdown.get("node_summary_aggregate_ms", 0.0))
     query_q_prepare_ms = float(routing_breakdown.get("query_q_prepare_ms", 0.0))
+    # Query-Q preparation is shared request-side work: the selected path uses it
+    # for summary/Q-K routing, while a full-KV baseline still needs equivalent
+    # query prefill before first-token decode. Charge it to both for active v2.
+    shared_query_compute_ms = query_q_prepare_ms if ttft_model == "active_node_v2" else 0.0
     selection_postprocess_ms = float(routing_breakdown.get("selection_postprocess_ms", 0.0))
     coarse_routing_ms = (
         float(routing_breakdown.get("coarse_topic_routing_ms", 0.0))
@@ -390,6 +387,14 @@ def build_system_cost_estimate(
         + candidate_return_ms
         + coordinator_fusion_ms
     )
+    full = _estimate_transfer_case(
+        total_tokens,
+        full_transfer_unit_count,
+        full_transfer_unit_count,
+        shared_query_compute_ms,
+        cost_config,
+    )
+
     active_selected = _estimate_transfer_case(
         transfer_accounting.get("selected_token_count", 0),
         transfer_accounting.get("unique_transfer_unit_count", 0),
@@ -456,6 +461,12 @@ def build_system_cost_estimate(
             "decode_startup_ms": decode_startup_ms,
             "candidate_metadata_bytes": candidate_metadata_bytes,
             "query_request_bytes": query_request_bytes,
+            "shared_query_compute_ms": float(shared_query_compute_ms),
+            "full_baseline_compute_scope": (
+                "includes_shared_query_q_prepare"
+                if ttft_model == "active_node_v2"
+                else "fetch_decode_only"
+            ),
         },
         "selected": selected,
         "legacy_selected": legacy_selected,

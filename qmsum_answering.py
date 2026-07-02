@@ -1,5 +1,7 @@
 from collections import defaultdict
 import re
+import time
+import warnings
 
 import torch
 
@@ -159,6 +161,49 @@ def has_repetitive_answer_text(answer_text):
     return False
 
 
+def safe_decode_generated_token_ids(tokenizer, token_ids):
+    """Decode generated ids defensively.
+
+    Some multi-GPU/long-context runs can produce ids that the fast tokenizer
+    cannot convert.  Treat those as bad generated tokens instead of crashing the
+    whole evaluation job.
+    """
+    raw_ids = token_ids.detach().cpu().view(-1).tolist()
+    max_token_id = len(tokenizer)
+    valid_ids = []
+    invalid_ids = []
+    for raw_id in raw_ids:
+        token_id = int(raw_id)
+        if 0 <= token_id < max_token_id:
+            valid_ids.append(token_id)
+        else:
+            invalid_ids.append(token_id)
+
+    decode_error = None
+    try:
+        text = tokenizer.decode(valid_ids, skip_special_tokens=True) if valid_ids else ""
+    except (OverflowError, ValueError, TypeError) as exc:
+        decode_error = f"{type(exc).__name__}: {exc}"
+        text = ""
+
+    return text, {
+        "generated_token_count": int(len(raw_ids)),
+        "valid_generated_token_count": int(len(valid_ids)),
+        "invalid_generated_token_count": int(len(invalid_ids)),
+        "invalid_generated_token_preview": invalid_ids[:16],
+        "decode_error": decode_error,
+    }
+
+
+def _answer_prompt_token_count(tokenizer, prompt_text):
+    return len(tokenizer(prompt_text, add_special_tokens=False).input_ids)
+
+
+def _print_answer_progress(progress_label, message):
+    if progress_label:
+        print(f"  answer eval {progress_label}: {message}", flush=True)
+
+
 def generate_answer_text(
     model,
     tokenizer,
@@ -171,25 +216,33 @@ def generate_answer_text(
     attention_mask = inputs.attention_mask.cuda()
 
     with torch.no_grad():
-        generated = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            do_sample=False,
-            max_new_tokens=max_new_tokens,
-            pad_token_id=tokenizer.eos_token_id,
-        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"`do_sample` is set to `False`.*",
+                category=UserWarning,
+            )
+            generated = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                do_sample=False,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=tokenizer.eos_token_id,
+            )
 
     answer_ids = generated[0][input_ids.shape[1] :]
-    raw_answer_text = tokenizer.decode(answer_ids, skip_special_tokens=True)
+    raw_answer_text, decode_metadata = safe_decode_generated_token_ids(tokenizer, answer_ids)
     answer_text, postprocess_actions = postprocess_generated_answer_text(raw_answer_text)
 
     del input_ids, attention_mask, generated
     torch.cuda.empty_cache()
     if return_metadata:
-        return answer_text, {
+        metadata = {
             "raw_answer_text": raw_answer_text,
             "postprocess_actions": postprocess_actions,
         }
+        metadata.update(decode_metadata)
+        return answer_text, metadata
     return answer_text
 
 
@@ -294,6 +347,7 @@ def build_answer_eval(
     answer_evidence_max_chars=600,
     oracle_turns=None,
     evaluate_oracle_answer=True,
+    progress_label=None,
 ):
     if selected_answer_turns is None:
         selected_answer_turns = selected_turns
@@ -328,17 +382,55 @@ def build_answer_eval(
             prompt_style=answer_prompt_style,
         )
 
-    full_answer, full_generation = generate_answer_text_with_retry(
-        model,
-        tokenizer,
-        full_prompt,
-        max_new_tokens=max_new_tokens,
+    full_context_tokens = _answer_prompt_token_count(tokenizer, full_prompt)
+    selected_context_tokens = _answer_prompt_token_count(tokenizer, selected_prompt)
+    oracle_context_tokens = (
+        _answer_prompt_token_count(tokenizer, oracle_prompt)
+        if oracle_prompt is not None
+        else 0
     )
-    selected_answer, selected_generation = generate_answer_text_with_retry(
-        model,
-        tokenizer,
+    _print_answer_progress(
+        progress_label,
+        (
+            "prompt_tokens "
+            f"full={full_context_tokens}, selected={selected_context_tokens}, "
+            f"oracle={oracle_context_tokens}, max_new={max_new_tokens}"
+        ),
+    )
+
+    def generate_stage(stage_name, prompt_text, prompt_tokens):
+        _print_answer_progress(
+            progress_label,
+            f"{stage_name} generation start ({prompt_tokens} prompt tokens)",
+        )
+        start_time = time.perf_counter()
+        answer_text, generation = generate_answer_text_with_retry(
+            model,
+            tokenizer,
+            prompt_text,
+            max_new_tokens=max_new_tokens,
+        )
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        generation["elapsed_ms"] = float(elapsed_ms)
+        _print_answer_progress(
+            progress_label,
+            (
+                f"{stage_name} generation done in {elapsed_ms / 1000.0:.1f}s "
+                f"(generated={generation.get('generated_token_count', 0)}, "
+                f"invalid={generation.get('invalid_generated_token_count', 0)})"
+            ),
+        )
+        return answer_text, generation
+
+    full_answer, full_generation = generate_stage(
+        "full",
+        full_prompt,
+        full_context_tokens,
+    )
+    selected_answer, selected_generation = generate_stage(
+        "selected",
         selected_prompt,
-        max_new_tokens=max_new_tokens,
+        selected_context_tokens,
     )
     oracle_answer = ""
     oracle_generation = {
@@ -350,11 +442,10 @@ def build_answer_eval(
     }
     oracle_answer_available = oracle_prompt is not None
     if oracle_answer_available:
-        oracle_answer, oracle_generation = generate_answer_text_with_retry(
-            model,
-            tokenizer,
+        oracle_answer, oracle_generation = generate_stage(
+            "oracle",
             oracle_prompt,
-            max_new_tokens=max_new_tokens,
+            oracle_context_tokens,
         )
 
     full_answer_f1 = compute_text_f1(full_answer, gold_answer)
@@ -370,17 +461,7 @@ def build_answer_eval(
         else {"is_bad": False, "reasons": []}
     )
 
-    full_context_tokens = len(
-        tokenizer(full_prompt, add_special_tokens=False).input_ids
-    )
-    selected_context_tokens = len(
-        tokenizer(selected_prompt, add_special_tokens=False).input_ids
-    )
-    oracle_context_tokens = (
-        len(tokenizer(oracle_prompt, add_special_tokens=False).input_ids)
-        if oracle_answer_available
-        else 0
-    )
+
     context_token_saving_ratio = 0.0
     if full_context_tokens > 0:
         context_token_saving_ratio = 1.0 - (
