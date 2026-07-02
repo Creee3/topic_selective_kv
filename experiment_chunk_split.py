@@ -104,7 +104,8 @@ def _get_qk_attention(
         # hidden_states[0] = embedding, hidden_states[i] = layer i-1 输出 = layer i 输入
         hidden = outputs.hidden_states[layer_idx]  # layer i 的输入
 
-    Q = q_proj(hidden)
+    Q = q_proj(hidden).float()
+    Q = torch.nan_to_num(Q, nan=0.0, posinf=1.0e4, neginf=-1.0e4)
     Q = Q.view(1, -1, num_heads, head_dim).transpose(1, 2)
     # Q: (1, num_heads, query_len, head_dim)
 
@@ -112,11 +113,12 @@ def _get_qk_attention(
     per_head_scores = []
     for ck in chunk_keys_list:
         # ck: (num_layers, num_kv_heads, chunk_len, head_dim)
-        K_layer = ck[layer_idx].unsqueeze(0).to(Q.device)
+        K_layer = ck[layer_idx].unsqueeze(0).to(Q.device).float()
         if num_kv_heads != num_heads:
             n_rep = num_heads // num_kv_heads
             K_layer = K_layer.repeat_interleave(n_rep, dim=1)
         attn = torch.matmul(Q, K_layer.transpose(-2, -1)) / scale
+        attn = torch.nan_to_num(attn, nan=0.0, posinf=1.0e4, neginf=-1.0e4)
         # attn: (1, num_heads, query_len, chunk_len)
         per_head = _pool_qk_attention(
             attn,
@@ -186,18 +188,19 @@ def _get_qk_attention_from_query_cache(
         layer_idx = num_layers + layer_idx
 
     entry = query_q_cache["q_by_layer"][int(layer_idx)]
-    Q = entry["q"]
+    Q = torch.nan_to_num(entry["q"].float(), nan=0.0, posinf=1.0e4, neginf=-1.0e4)
     num_heads = int(entry["num_heads"])
     num_kv_heads = int(entry["num_key_value_heads"])
     scale = float(entry["scale"])
 
     per_head_scores = []
     for ck in chunk_keys_list:
-        K_layer = ck[int(layer_idx)].unsqueeze(0).to(Q.device)
+        K_layer = ck[int(layer_idx)].unsqueeze(0).to(Q.device).float()
         if num_kv_heads != num_heads:
             n_rep = num_heads // num_kv_heads
             K_layer = K_layer.repeat_interleave(n_rep, dim=1)
         attn = torch.matmul(Q, K_layer.transpose(-2, -1)) / scale
+        attn = torch.nan_to_num(attn, nan=0.0, posinf=1.0e4, neginf=-1.0e4)
         per_head = _pool_qk_attention(
             attn,
             mode=qk_token_pooling,
@@ -229,7 +232,7 @@ def _chunk_qk_scores_per_head(
         )
         all_scores.append(scores)
 
-    avg_scores = np.mean(all_scores, axis=0)  # (n_chunks, n_heads)
+    avg_scores = np.nan_to_num(np.mean(all_scores, axis=0), nan=0.0, posinf=1.0e4, neginf=-1.0e4)  # (n_chunks, n_heads)
     return avg_scores, {
         "layers": layer_indices,
         "n_heads": avg_scores.shape[1],
@@ -263,7 +266,7 @@ def _chunk_qk_scores_per_head_cached(
         )
         all_scores.append(scores)
 
-    avg_scores = np.mean(all_scores, axis=0)
+    avg_scores = np.nan_to_num(np.mean(all_scores, axis=0), nan=0.0, posinf=1.0e4, neginf=-1.0e4)
     return avg_scores, {
         "layers": normalized_layers,
         "n_heads": avg_scores.shape[1],

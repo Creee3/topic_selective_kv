@@ -4131,13 +4131,15 @@ def score_minmax_key_summaries_from_query_cache(
         per_layer_scores = []
         for layer_idx in normalized_layers:
             entry = query_q_cache["q_by_layer"][int(layer_idx)]
-            query_q = entry["q"].float()
+            query_q = torch.nan_to_num(entry["q"].float(), nan=0.0, posinf=1.0e4, neginf=-1.0e4)
             num_heads = int(entry["num_heads"])
             num_kv_heads = int(entry["num_key_value_heads"])
             scale = float(entry["scale"])
 
             k_min = summary["k_min"][int(layer_idx)].to(query_q.device).float()
             k_max = summary["k_max"][int(layer_idx)].to(query_q.device).float()
+            k_min = torch.nan_to_num(k_min, nan=0.0, posinf=1.0e4, neginf=-1.0e4)
+            k_max = torch.nan_to_num(k_max, nan=0.0, posinf=1.0e4, neginf=-1.0e4)
             if num_kv_heads != num_heads:
                 n_rep = num_heads // num_kv_heads
                 k_min = k_min.repeat_interleave(n_rep, dim=0)
@@ -4149,14 +4151,15 @@ def score_minmax_key_summaries_from_query_cache(
                 k_min.unsqueeze(1),
             )
             query_scores = (query_q * optimistic_k).sum(dim=-1) / scale
+            query_scores = torch.nan_to_num(query_scores, nan=0.0, posinf=1.0e4, neginf=-1.0e4)
             per_head = _pool_minmax_query_scores(
                 query_scores,
                 mode=qk_token_pooling,
                 query_topk_ratio=qk_query_topk_ratio,
             )
-            per_layer_scores.append(per_head.detach().cpu().numpy())
+            per_layer_scores.append(np.nan_to_num(per_head.detach().cpu().numpy(), nan=0.0, posinf=1.0e4, neginf=-1.0e9))
 
-        candidate_scores.append(np.mean(per_layer_scores, axis=0))
+        candidate_scores.append(np.nan_to_num(np.mean(per_layer_scores, axis=0), nan=0.0, posinf=1.0e4, neginf=-1.0e9))
 
     return np.stack(candidate_scores, axis=0), {
         "layers": normalized_layers,
@@ -4294,7 +4297,7 @@ def score_candidates_node_summary_gate(
             )
         score_ms += 1000.0 * (time.perf_counter() - score_start)
 
-        scores_matrix = np.asarray(scores_matrix, dtype=np.float32)
+        scores_matrix = np.nan_to_num(np.asarray(scores_matrix, dtype=np.float32), nan=0.0, posinf=1.0e4, neginf=-1.0e9)
         if scores_matrix.ndim == 1:
             scores_matrix = scores_matrix.reshape(1, -1)
 
@@ -4613,7 +4616,7 @@ def score_candidates_exact_qk_batched(
         qk_model_inference_ms += 1000.0 * (
             time.perf_counter() - qk_model_inference_start_time
         )
-        scores_matrix = np.asarray(scores_matrix, dtype=np.float32)
+        scores_matrix = np.nan_to_num(np.asarray(scores_matrix, dtype=np.float32), nan=0.0, posinf=1.0e4, neginf=-1.0e9)
         if scores_matrix.ndim == 1:
             scores_matrix = scores_matrix.reshape(1, -1)
 

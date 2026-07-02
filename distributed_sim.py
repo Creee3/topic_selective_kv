@@ -150,6 +150,7 @@ def aggregate_qk_scores(scores_matrix, mode="mean", topk=4):
     flat = np.asarray(scores_matrix, dtype=np.float32).reshape(-1)
     if flat.size == 0:
         return -1e9
+    flat = np.nan_to_num(flat, nan=-1.0e9, posinf=1.0e4, neginf=-1.0e9)
     if mode == "mean":
         return float(flat.mean())
     if mode == "max":
